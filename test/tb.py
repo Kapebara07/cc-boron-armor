@@ -11,7 +11,7 @@ def show(lua, res, tag):
     log = lua.eval('GETLOG()')
     if log: print('   LOG:', log[-600:])
 # 1) пустой склад -> список нехватки
-lua, res = run('{qty=1, raw={}}', limit=3, events=False)
+lua, res = run('{qty=1, raw={}}', limit=15, events=False)
 print('\n'.join(lua.eval('SCREEN()').split('\n')[:16]))
 # 2) ровно минимум из исходных предметов, авторежим без нажатий
 lua, res = run('{qty=1, raw={' + BASE + '}}', limit=30000, events=False)
@@ -21,7 +21,7 @@ if res != 'DONE': print(lua.eval('SCREEN()'))
 scn = '''{qty=2, raw={["minecraft:iron_ingot"]=56, ["minecraft:deepslate_iron_ore"]=5, ["minecraft:iron_nugget"]=10,
  ["minecraft:charcoal"]=66, ["arcon:borate_ore"]=32, ["arcon:deepslate_nickel_ore"]=4, ["arcon:chromite_ore"]=8,
  ["arcon:deepslate_manganese_ore"]=4, ["minecraft:clay_ball"]=8, ["minecraft:sand"]=8, ["minecraft:crying_obsidian"]=8}}'''
-lua, res = run(scn, limit=60000)
+lua, res = run(scn, limit=60000, events=False)
 show(lua, res, 'TWO-ALT')
 # 4) готовые промежуточные на складе
 scn = '''{qty=1, stock={["arcon:coke_dust"]=33, ["arcon:boron_powder"]=16, ["arcon:refractory_compound"]=4, ["arcon:nickel_ingot"]=4},
@@ -30,5 +30,5 @@ scn = '''{qty=1, stock={["arcon:coke_dust"]=33, ["arcon:boron_powder"]=16, ["arc
 lua, res = run(scn, limit=30000, events=False)
 show(lua, res, 'INTERMED')
 # 5) нет воды
-lua, res = run('{qty=1, raw={' + BASE + '}}', limit=3, events=False, pre='NO_WATER = true')
+lua, res = run('{qty=1, raw={' + BASE + '}}', limit=15, events=False, pre='NO_WATER = true')
 print('\n'.join(lua.eval('SCREEN()').split('\n')[:6]))

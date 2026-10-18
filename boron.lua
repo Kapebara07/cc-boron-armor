@@ -16,8 +16,9 @@ local PER_FURNACE = 16    -- партий в печь
 local BASIN_TRIAL = 40    -- сек: если бассейн за это время не тронул ингредиенты — у него другой механизм
 local STALL = 300         -- сек без прогресса -> предупреждение
 
-local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, auto = true}
-local AUTO_EVERY = 10     -- сек: как часто в авторежиме проверять, хватает ли на следующую броню
+local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, active = false, target = 1, done = 0}
+local AUTO_EVERY = 10     -- сек: как часто при работе проверять, хватает ли на следующую броню
+local MAX_BATCH = 4      -- сколько брони планировать за один заход
 local function loadCfg()
   if fs.exists(CFG_FILE) then
     local f = fs.open(CFG_FILE, "r"); local t = textutils.unserialize(f.readAll()); f.close()
@@ -658,185 +659,384 @@ local function stop()
 end
 
 ---------------------------------------------------------------- экран
+-- Одно и то же меню на компьютере (мышь) и на всех мониторах (касание).
+-- Экраны: menu (настройка), pick (выбор хранилищ), list (что найдено), start (сколько делать), work (работа).
 local function fmtTime(s)
   s = math.floor(s)
   return string.format("%d:%02d", math.floor(s / 60), s % 60)
 end
+local function short(n) return (n:gsub("^minecraft:", "")) end
 
-local buttons = {}
-local function draw(t, isMon)
+local ROLES = {
+  {key = "raw", name = "SYRE", hint = "kuda kidayut rudu, ugol, slitki"},
+  {key = "stock", name = "ZAPASY", hint = "izlishki i polufabrikaty"},
+  {key = "output", name = "GOTOVAYA BRONYA", hint = "kuda klast bronyu"},
+  {key = "waste", name = "POBOCHNOE", hint = "opyt, bulyzhnik i t.p."},
+}
+local UI = {screen = "menu", scroll = 0, role = nil, cand = {}, canMake = nil, editQty = 1, inf = false}
+local BTN = {}   -- кнопки по устройствам: BTN["term"] / BTN["monitor_0"] = {{x1,x2,y,id,arg}}
+
+local function storagesReady()
+  return #cfg.raw > 0 and #cfg.stock > 0 and #cfg.output > 0 and #cfg.waste > 0
+end
+local function roleOf(n)
+  for _, r in ipairs(ROLES) do if inList(cfg[r.key], n) then return r end end
+end
+
+-- все хранилища сети, которые можно назначить складом (не машины)
+local function candidates()
+  local t = {}
+  for _, n in ipairs(peripheral.getNames()) do
+    local b = baseName(n)
+    if peripheral.hasType(n, "inventory") and not KIND[b] and not IGNORE[b] then
+      local l = call(n, "list") or {}
+      local used, first = 0, nil
+      for _, it in pairs(l) do used = used + 1; first = first or it.name end
+      t[#t + 1] = {name = n, size = call(n, "size") or 0, used = used, first = first}
+    end
+  end
+  table.sort(t, function(a, b) return a.name < b.name end)
+  return t
+end
+
+-- на сколько брони хватает прямо сейчас (бинпоиск по планировщику)
+local function maxMakeable()
+  local stock = scan()
+  if not plan(stock, 1) then return 0 end
+  local lo, hi = 1, 64
+  while lo < hi do
+    local mid = math.floor((lo + hi + 1) / 2)
+    if plan(stock, mid) then lo = mid else hi = mid - 1 end
+  end
+  return lo
+end
+
+local function draw(t, dev)
   local w, h = t.getSize()
+  local B = {}
+  BTN[dev] = B
   t.setBackgroundColor(colors.black); t.clear()
-  local function line(y, text, fg, bg)
-    if y > h then return end
-    t.setCursorPos(1, y)
-    if bg then t.setBackgroundColor(bg); t.write(string.rep(" ", w)); t.setCursorPos(1, y) end
-    t.setTextColor(fg or colors.white); t.write(text:sub(1, w))
+  local function put(x, y, s, fg, bg)
+    if y < 1 or y > h then return end
+    t.setCursorPos(x, y)
+    if bg then t.setBackgroundColor(bg) end
+    t.setTextColor(fg or colors.white); t.write(s:sub(1, math.max(0, w - x + 1)))
     t.setBackgroundColor(colors.black)
   end
-  line(1, " " .. ru(R.target), colors.white, colors.gray)
-  local y = 3
-  if S.mode == "run" then
-    local done = countOutput() - S.startOut
-    line(2, string.format(" IDET SBORKA  %d/%d  vremya %s", done, S.qty, fmtTime(now() - S.t0)), colors.black, colors.yellow)
-    if S.stall then line(y, " ! Net progressa " .. fmtTime(now() - S.lastProgress) .. ": " .. S.stall, colors.red); y = y + 1 end
-    local list = {}
-    for rid, n in pairs(S.runs) do if n > 0 then list[#list + 1] = {rid, n} end end
-    table.sort(list, function(a, b) return a[1] < b[1] end)
-    line(y, " Ostalos zapustit:", colors.lightGray); y = y + 1
-    for _, e in ipairs(list) do
-      local r = byId[e[1]]
-      line(y, string.format("  %-9s x%-3d %s", r.station, e[2], ru(r.main)), colors.white); y = y + 1
+  local function bar(y, s, fg, bg)
+    t.setCursorPos(1, y); t.setBackgroundColor(bg); t.write(string.rep(" ", w))
+    put(1, y, s, fg, bg)
+  end
+  local function btn(x, y, label, bg, id, arg)
+    put(x, y, " " .. label .. " ", colors.white, bg)
+    B[#B + 1] = {x1 = x, x2 = x + #label + 1, y = y, id = id, arg = arg}
+    return x + #label + 3
+  end
+  local function machinesLine(y)
+    local nb = {mix = 0, compact = 0, unk = 0}
+    for _, b in ipairs(M.basin) do
+      if b.role then nb[b.role] = nb[b.role] + 1 else nb.unk = nb.unk + 1 end
     end
-    if S.line then
-      line(y, string.format(" Lenta: %s  %d/%d", ru(byId[S.line.rid].main), S.line.done, S.line.k), colors.cyan); y = y + 1
+    put(1, y, string.format(" Pechi %d  Drobilki %d  Zhernova %d  Promyvka %d  Basseyny %d (mix %d/press %d/? %d)",
+      #M.furnace, #M.crush, #M.mill, #M.wash, #M.basin, nb.mix, nb.compact, nb.unk), colors.lightGray)
+    put(1, y + 1, string.format(" Lenta %s  Razvertyvateli %d  Priemniki %d  Monitory %d",
+      #M.belt == 1 and "da" or (#M.belt == 0 and "NET" or "LISHNYAYA(" .. #M.belt .. ")"),
+      #M.deployer, #M.buffers, #M.monitors), colors.lightGray)
+  end
+  local title = " " .. ru(R.target)
+
+  if UI.screen == "menu" then
+    bar(1, title .. " - NASTROYKA", colors.white, colors.gray)
+    put(1, 3, " Sklady (nazhmi VYBRAT, mozhno neskolko na rol):", colors.yellow)
+    local y = 4
+    for _, r in ipairs(ROLES) do
+      put(2, y, string.format("%-16s", r.name), colors.white)
+      local names = {}
+      for _, n in ipairs(cfg[r.key]) do names[#names + 1] = short(n) end
+      local txt = #names > 0 and table.concat(names, ", ") or "- ne vybrano -"
+      put(19, y, txt:sub(1, math.max(1, w - 30)), #names > 0 and colors.lime or colors.red)
+      btn(w - 9, y, "VYBRAT", colors.blue, "pick", r.key)
+      y = y + 1
     end
-  elseif S.missing then
-    line(2, cfg.auto and " NE HVATAET RESURSOV - avto zhdet, dokladyvay v syre" or " NE HVATAET RESURSOV",
-      colors.white, colors.red)
-    local list = {}
-    for it, n in pairs(S.missing) do list[#list + 1] = {it, n} end
-    table.sort(list, function(a, b) return a[1] < b[1] end)
-    for _, e in ipairs(list) do
-      local via = {}
-      for _, r in ipairs(byOut[e[1]] or {}) do
-        local a = r.ingr[1].alts[1]
-        if #r.ingr == 1 then via[#via + 1] = ru(a) end
+    y = y + 1
+    put(1, y, " Basseyny (chto nad nimi; AVTO = PK opredelit sam):", colors.yellow); y = y + 1
+    if #M.basin == 0 then put(2, y, "- basseynov v seti net -", colors.red); y = y + 1 end
+    for _, b in ipairs(M.basin) do
+      put(2, y, short(b.name), colors.white)
+      local lbl = b.role == "mix" and "MIKSER" or (b.role == "compact" and "PRESS" or "AVTO")
+      btn(w - 9, y, string.format("%-6s", lbl), b.role and colors.cyan or colors.gray, "basin", b.name)
+      y = y + 1
+    end
+    y = y + 1
+    put(1, y, " Naydeno v seti:", colors.yellow)
+    btn(w - 9, y, "SPISOK", colors.blue, "list")
+    machinesLine(y + 1)
+    if S.msg ~= "" then put(1, h - 1, " " .. S.msg, colors.orange) end
+    local x = btn(1, h, "OBNOVIT", colors.gray, "refresh")
+    btn(w - 19, h, "ZAPUSK SISTEMY >", storagesReady() and colors.green or colors.gray, "tostart")
+
+  elseif UI.screen == "pick" then
+    local role
+    for _, r in ipairs(ROLES) do if r.key == UI.role then role = r end end
+    bar(1, " VYBOR: " .. role.name .. " (" .. role.hint .. ")", colors.white, colors.gray)
+    put(1, 2, " Nazhmi na stroku. [x] - vybrano, seroe - uzhe drugaya rol (pereneset).", colors.lightGray)
+    local rows = h - 4
+    local maxScroll = math.max(0, #UI.cand - rows)
+    UI.scroll = math.max(0, math.min(UI.scroll, maxScroll))
+    for i = 1, rows do
+      local c = UI.cand[i + UI.scroll]
+      if not c then break end
+      local y = 2 + i
+      local mine = inList(cfg[UI.role], c.name)
+      local other = roleOf(c.name)
+      local mark = mine and "[x] " or "[ ] "
+      local info = string.format("%s%-28s %3d/%-3d %s", mark, short(c.name), c.used, c.size,
+        c.first and ru(c.first) or "pusto")
+      if other and not mine then info = info .. "  (" .. other.name .. ")" end
+      put(1, y, string.rep(" ", w), colors.white, mine and colors.green or colors.black)
+      put(2, y, info, mine and colors.black or (other and colors.gray or colors.white), mine and colors.green or nil)
+      B[#B + 1] = {x1 = 1, x2 = w, y = y, id = "toggle", arg = c.name}
+    end
+    if #UI.cand == 0 then put(2, 4, "V seti net hranilisch. Postav modem na sunduk i nazhmi PKM.", colors.red) end
+    local x = btn(1, h, "^", colors.gray, "up")
+    x = btn(x, h, "v", colors.gray, "down")
+    put(x, h, string.format("%d-%d iz %d", UI.scroll + 1, math.min(#UI.cand, UI.scroll + rows), #UI.cand), colors.lightGray)
+    btn(w - 9, h, "GOTOVO", colors.green, "back")
+
+  elseif UI.screen == "list" then
+    bar(1, " CHTO NAYDENO V SETI", colors.white, colors.gray)
+    local rows = {}
+    local function add(n, what) rows[#rows + 1] = {n, what} end
+    for _, f in ipairs(M.furnace) do add(f.name, "promyshlennaya pech") end
+    for _, f in ipairs(M.furnaceOut) do if f.from == 1 then add(f.name, "pech (vyhod, modem speredi)") end end
+    for _, x in ipairs(M.crush) do add(x.name, "drobilka") end
+    for _, x in ipairs(M.mill) do add(x.name, "zhernova") end
+    for _, x in ipairs(M.wash) do add(x.name, "promyvka (depo)") end
+    for _, x in ipairs(M.basin) do
+      add(x.name, "bassein: " .. (x.role == "mix" and "mikser" or (x.role == "compact" and "press" or "opredelit sam")))
+    end
+    for _, x in ipairs(M.belt) do add(x.name, "lenta") end
+    for _, x in ipairs(M.deployer) do add(x.name, "razvertyvatel") end
+    for _, r in ipairs(ROLES) do for _, n in ipairs(cfg[r.key]) do add(n, "sklad: " .. r.name) end end
+    for _, n in ipairs(M.buffers) do add(n, "priemnik (PK zabiraet iz nego vse)") end
+    for _, n in ipairs(M.ignored) do add(n, "ne ispolzuetsya") end
+    for _, n in ipairs(M.monitors) do add(n, "monitor") end
+    local lines = h - 3
+    UI.scroll = math.max(0, math.min(UI.scroll, math.max(0, #rows - lines)))
+    for i = 1, lines do
+      local r = rows[i + UI.scroll]
+      if not r then break end
+      put(2, 1 + i, string.format("%-32s %s", short(r[1]), r[2]),
+        r[2]:find("priemnik") and colors.orange or colors.white)
+    end
+    local x = btn(1, h, "^", colors.gray, "up")
+    btn(x, h, "v", colors.gray, "down")
+    btn(w - 8, h, "NAZAD", colors.blue, "back")
+
+  elseif UI.screen == "start" then
+    bar(1, title .. " - ZAPUSK", colors.white, colors.gray)
+    put(2, 3, "Skolko broni sdelat?", colors.yellow)
+    local x = 2
+    x = btn(x, 5, "-10", colors.gray, "qty", -10)
+    x = btn(x, 5, "-1", colors.gray, "qty", -1)
+    put(x + 1, 5, UI.inf and "BESKONECHNO" or string.format("%4d", UI.editQty), colors.white)
+    x = x + (UI.inf and 13 or 6)
+    x = btn(x, 5, "+1", colors.gray, "qty", 1)
+    x = btn(x, 5, "+10", colors.gray, "qty", 10)
+    btn(x + 1, 5, UI.inf and "[x] BESKONECHNO" or "[ ] BESKONECHNO", UI.inf and colors.green or colors.gray, "inf")
+    local y = 7
+    if UI.canMake == nil then
+      put(2, y, "Nazhmi PROVERIT, chtoby uznat, na skolko hvataet resursov.", colors.lightGray)
+    else
+      put(2, y, "Seychas resursov hvataet na: " .. UI.canMake, UI.canMake > 0 and colors.lime or colors.red)
+      y = y + 1
+      if S.noMachine then
+        for k in pairs(S.noMachine) do put(4, y, "net: " .. (STATION_RU[k] or k), colors.red); y = y + 1 end
       end
-      local txt = string.format("  x%-4d %s", e[2], ru(e[1]))
-      if #via > 0 then txt = txt .. "  (iz: " .. table.concat(via, ", ") .. ")" end
-      line(y, txt, colors.red); y = y + 1
+      if UI.canMake == 0 and S.missing then
+        put(2, y, "Na 1 bronyu ne hvataet:", colors.red); y = y + 1
+        local list = {}
+        for it, n in pairs(S.missing) do list[#list + 1] = {it, n} end
+        table.sort(list, function(a, b) return a[1] < b[1] end)
+        for _, e in ipairs(list) do
+          if y < h - 2 then put(4, y, string.format("x%-4d %s", e[2], ru(e[1])), colors.red); y = y + 1 end
+        end
+      end
     end
-  elseif S.noMachine then
-    line(2, " NE HVATAET MEHANIZMOV", colors.white, colors.red)
-    for k in pairs(S.noMachine) do
-      local txt = k == "storage" and "sklady ne naznacheny (klavisha S na PK)" or (STATION_RU[k] or k)
-      line(y, "  " .. txt, colors.red); y = y + 1
+    put(2, h - 2, "Mozhno zapustit i bez resursov: sistema budet zhdat i nachnet sama.", colors.lightGray)
+    if S.msg ~= "" then put(1, h - 1, " " .. S.msg, colors.orange) end
+    local bx = btn(1, h, "< MENU", colors.gray, "menu")
+    btn(bx, h, "PROVERIT", colors.blue, "probe")
+    btn(w - 9, h, "START", colors.green, "go")
+
+  else -- work
+    bar(1, title .. " - RABOTA", colors.white, colors.gray)
+    local goal = cfg.target > 0 and tostring(cfg.target) or "beskonechno"
+    local y = 3
+    if S.mode == "run" then
+      bar(2, string.format(" IDET SBORKA: zahod %d sht, sdelano %d iz %s, vremya %s", S.qty, cfg.done, goal,
+        fmtTime(now() - S.t0)), colors.black, colors.yellow)
+      if S.stall then put(1, y, " ! Net progressa " .. fmtTime(now() - S.lastProgress) .. ": " .. S.stall, colors.red); y = y + 1 end
+      local list = {}
+      for rid, n in pairs(S.runs) do if n > 0 then list[#list + 1] = {rid, n} end end
+      table.sort(list, function(a, b) return a[1] < b[1] end)
+      put(1, y, " Ostalos zapustit:", colors.lightGray); y = y + 1
+      for _, e in ipairs(list) do
+        local r = byId[e[1]]
+        if y < h - 3 then put(1, y, string.format("  %-8s x%-3d %s", r.station, e[2], ru(r.main)), colors.white); y = y + 1 end
+      end
+      if S.line then
+        put(1, y, string.format(" Lenta: %s  %d/%d", ru(byId[S.line.rid].main), S.line.done, S.line.k), colors.cyan); y = y + 1
+      end
+    elseif S.noMachine then
+      bar(2, " NE HVATAET MEHANIZMOV  (sdelano " .. cfg.done .. " iz " .. goal .. ")", colors.white, colors.red)
+      for k in pairs(S.noMachine) do
+        local txt = k == "storage" and "sklady ne naznacheny (STOP > MENU)" or (STATION_RU[k] or k)
+        put(3, y, txt, colors.red); y = y + 1
+      end
+    elseif S.missing then
+      bar(2, " ZHDU RESURSY - dokladyvay v SYRE  (sdelano " .. cfg.done .. " iz " .. goal .. ")", colors.white, colors.red)
+      local list = {}
+      for it, n in pairs(S.missing) do list[#list + 1] = {it, n} end
+      table.sort(list, function(a, b) return a[1] < b[1] end)
+      for _, e in ipairs(list) do
+        local via = {}
+        for _, r in ipairs(byOut[e[1]] or {}) do
+          if #r.ingr == 1 then via[#via + 1] = ru(r.ingr[1].alts[1]) end
+        end
+        local txt = string.format("  x%-4d %s", e[2], ru(e[1]))
+        if #via > 0 then txt = txt .. "  (iz: " .. table.concat(via, ", ") .. ")" end
+        if y < h - 3 then put(1, y, txt, colors.red); y = y + 1 end
+      end
+    else
+      bar(2, " PROVERYAYU SKLAD...  (sdelano " .. cfg.done .. " iz " .. goal .. ")", colors.black, colors.lime)
     end
-  else
-    line(2, " VSE EST - MOZHNO SOZDAT", colors.black, colors.lime)
-  end
-  if S.msg ~= "" then line(y, " " .. S.msg, colors.orange); y = y + 1 end
-  -- механизмы
-  local nb = {mix = 0, compact = 0, unk = 0}
-  for _, b in ipairs(M.basin) do
-    if b.role then nb[b.role] = nb[b.role] + 1 else nb.unk = nb.unk + 1 end
-  end
-  line(h - 2, string.format(" Pechi %d  Drobilki %d  Zhernova %d  Promyvka %d  Bassein mix %d/press %d/? %d",
-    #M.furnace, #M.crush, #M.mill, #M.wash, nb.mix, nb.compact, nb.unk), colors.lightGray)
-  line(h - 1, string.format(" Lenta %s  Razvertyvateli %d  Priemniki %d",
-    #M.belt == 1 and "da" or (#M.belt == 0 and "NET" or "LISHNYAYA (" .. #M.belt .. ")"),
-    #M.deployer, #M.buffers), colors.lightGray)
-  -- кнопки
-  buttons = {}
-  t.setCursorPos(1, h)
-  local function btn(label, bg, id)
-    local x = t.getCursorPos()
-    t.setBackgroundColor(bg); t.setTextColor(colors.white); t.write(" " .. label .. " ")
-    t.setBackgroundColor(colors.black); t.write(" ")
-    buttons[#buttons + 1] = {x1 = x, x2 = x + #label + 1, id = id}
-  end
-  if S.mode == "run" then
-    btn("STOP", colors.red, "stop")
-  else
-    btn("-", colors.gray, "minus")
-    t.setTextColor(colors.white); t.write(tostring(S.qty) .. " ")
-    btn("+", colors.gray, "plus")
-    btn("SOZDAT", (S.missing or S.noMachine) and colors.gray or colors.green, "go")
-    btn("PROVERIT", colors.blue, "check")
-    btn(cfg.auto and "AVTO: VKL" or "AVTO: VYKL", cfg.auto and colors.green or colors.gray, "auto")
-  end
-  if not isMon then
-    t.setBackgroundColor(colors.black); t.setTextColor(colors.gray); t.write(" S-sklady")
+    if S.msg ~= "" then put(1, h - 3, " " .. S.msg, colors.orange) end
+    machinesLine(h - 2)
+    btn(1, h, "STOP", colors.red, "stop")
   end
 end
 
 local function redraw()
   for _, m in ipairs(M.monitors) do
     local mon = peripheral.wrap(m)
-    mon.setTextScale(0.5)
-    draw(mon, true)
-  end
-  if not S.inSetup then draw(term, false) end
-end
-
-local function press(id)
-  if id == "minus" then S.qty = math.max(1, S.qty - 1); check()
-  elseif id == "plus" then S.qty = math.min(16, S.qty + 1); check()
-  elseif id == "check" then discover(); check()
-  elseif id == "go" then
-    if not start() then S.msg = "Zapusk otmenen: chego-to ne hvataet" else S.msg = "" end
-  elseif id == "stop" then
-    stop(); cfg.auto = false; saveCfg(); S.msg = "Ostanovleno, avtorezhim vyklyuchen"
-  elseif id == "auto" then
-    cfg.auto = not cfg.auto; saveCfg(); S.lastAuto = 0
-    S.msg = cfg.auto and "Avtorezhim vklyuchen" or "Avtorezhim vyklyuchen"
-  end
-end
-
----------------------------------------------------------------- настройка складов
-local function setup()
-  S.inSetup = true
-  term.setBackgroundColor(colors.black); term.clear(); term.setCursorPos(1, 1)
-  local invs = {}
-  for _, n in ipairs(peripheral.getNames()) do
-    local b = baseName(n)
-    if peripheral.hasType(n, "inventory") and not KIND[b] and not IGNORE[b] then invs[#invs + 1] = n end
-  end
-  table.sort(invs)
-  print("Hranilischa v seti:")
-  for i, n in ipairs(invs) do
-    local l = call(n, "list") or {}
-    local c = 0
-    for _ in pairs(l) do c = c + 1 end
-    print(string.format("%2d) %s  (zanyato slotov %d/%d)", i, n, c, call(n, "size") or 0))
-  end
-  local function ask(q)
-    write(q .. " (nomera cherez probel): ")
-    local t = {}
-    for num in read():gmatch("%d+") do
-      local n = invs[tonumber(num)]
-      if n then t[#t + 1] = n end
+    if mon then
+      mon.setTextScale(0.5)
+      draw(mon, m)
     end
-    return t
   end
-  cfg.raw = ask("SYRE (kuda ty kladesh rudu/ugol/slitki)")
-  cfg.stock = ask("ZAPASY (izlishki i polufabrikaty)")
-  cfg.output = ask("GOTOVAYA BRONYA")
-  cfg.waste = ask("POBOCHNOE (opyt, bulyzhnik i t.p.)")
-  saveCfg()
-  print("Sohraneno. Vse ostalnye sunduki = priemniki rezultatov mashin.")
-  sleep(2)
-  S.inSetup = false
+  draw(term, "term")
+end
+
+---------------------------------------------------------------- запуск заходов
+-- следующий заход: самая большая партия, на которую хватает (до MAX_BATCH и до остатка заказа)
+local function startNext()
+  discover()
+  scan(); drain(); unloadDeployers()
+  local left = cfg.target > 0 and (cfg.target - cfg.done) or MAX_BATCH
+  for k = math.min(MAX_BATCH, left), 1, -1 do
+    S.qty = k
+    local ok, runs = check()
+    if ok then
+      S.runs = runs
+      S.mode = "run"
+      S.startOut = countOutput()
+      S.t0 = now()
+      S.msg = ""
+      progress()
+      return true
+    end
+    if S.noMachine then break end
+  end
+  S.mode = "wait"
+  return false
+end
+
+local function press(id, arg)
+  S.msg = ""
+  if id == "pick" then
+    UI.role = arg; UI.scroll = 0; UI.cand = candidates(); UI.screen = "pick"
+  elseif id == "toggle" then
+    local list = cfg[UI.role]
+    if inList(list, arg) then
+      for i, n in ipairs(list) do if n == arg then table.remove(list, i) break end end
+    else
+      for _, r in ipairs(ROLES) do       -- у хранилища одна роль
+        for i, n in ipairs(cfg[r.key]) do if n == arg then table.remove(cfg[r.key], i) break end end
+      end
+      list[#list + 1] = arg
+    end
+    saveCfg(); discover()
+  elseif id == "basin" then
+    local cur = cfg.basins[arg]
+    cfg.basins[arg] = cur == nil and "mix" or (cur == "mix" and "compact" or nil)
+    saveCfg(); discover()
+  elseif id == "list" then UI.scroll = 0; UI.screen = "list"
+  elseif id == "up" then UI.scroll = math.max(0, UI.scroll - 5)
+  elseif id == "down" then UI.scroll = UI.scroll + 5
+  elseif id == "back" then UI.screen = "menu"
+  elseif id == "refresh" then discover(); S.msg = "Set pereproverena"
+  elseif id == "tostart" then
+    if storagesReady() then
+      UI.screen = "start"; UI.canMake = nil
+    else
+      S.msg = "Snachala vyberi vse 4 sklada"
+    end
+  elseif id == "menu" then UI.screen = "menu"
+  elseif id == "qty" then UI.inf = false; UI.editQty = math.max(1, math.min(999, UI.editQty + arg))
+  elseif id == "inf" then UI.inf = not UI.inf
+  elseif id == "probe" then
+    S.msg = "Schitayu..."; redraw()
+    discover(); S.qty = 1; check()
+    UI.canMake = maxMakeable()
+    S.msg = ""
+  elseif id == "go" then
+    cfg.target = UI.inf and 0 or UI.editQty
+    cfg.done = 0
+    cfg.active = true
+    saveCfg()
+    UI.screen = "work"; S.mode = "wait"; S.lastAuto = 0
+  elseif id == "stop" then
+    stop()
+    cfg.active = false; saveCfg()
+    UI.screen = "start"; S.msg = "Ostanovleno. Sdelano: " .. cfg.done
+  end
 end
 
 ---------------------------------------------------------------- главный цикл
 local function worker()
   while true do
-    if S.mode == "run" then
-      discover()
-      scan()
-      drain()
-      scan()
-      dispatchSimple("crush", M.crush, PER_CRUSH, nil)
-      dispatchSimple("wash", M.wash, PER_WASH, S.washJob)
-      dispatchSimple("mill", M.mill, PER_MILL, S.millJob)
-      dispatchFurnace()
-      dispatchBasins()
-      dispatchLine()
-      if allDone() then
-        S.mode = "idle"; S.msg = "GOTOVO: sozdano " .. S.qty
-        unloadDeployers()
-        check()
-      elseif now() - S.lastProgress > STALL then
-        local wait = {}
-        for rid, n in pairs(S.runs) do if n > 0 then wait[#wait + 1] = ru(byId[rid].main) end end
-        S.stall = #wait > 0 and ("zhdu: " .. table.concat(wait, ", ")) or "mashiny ne vydayut rezultat"
+    if cfg.active then
+      if S.mode == "run" then
+        discover()
+        scan()
+        drain()
+        scan()
+        dispatchSimple("crush", M.crush, PER_CRUSH, nil)
+        dispatchSimple("wash", M.wash, PER_WASH, S.washJob)
+        dispatchSimple("mill", M.mill, PER_MILL, S.millJob)
+        dispatchFurnace()
+        dispatchBasins()
+        dispatchLine()
+        if allDone() then
+          cfg.done = cfg.done + S.qty
+          unloadDeployers()
+          S.mode = "wait"; S.lastAuto = 0
+          if cfg.target > 0 and cfg.done >= cfg.target then
+            cfg.active = false
+            UI.screen = "start"
+            S.msg = "GOTOVO: sdelano " .. cfg.done
+          end
+          saveCfg()
+        elseif now() - S.lastProgress > STALL then
+          local wait = {}
+          for rid, n in pairs(S.runs) do if n > 0 then wait[#wait + 1] = ru(byId[rid].main) end end
+          S.stall = #wait > 0 and ("zhdu: " .. table.concat(wait, ", ")) or "mashiny ne vydayut rezultat"
+        end
+      elseif now() - (S.lastAuto or 0) >= AUTO_EVERY then
+        S.lastAuto = now()
+        startNext()
       end
-    elseif cfg.auto and not S.inSetup and now() - (S.lastAuto or 0) >= AUTO_EVERY then
-      -- авторежим: как только на складе хватает на броню — начинаем сами
-      S.lastAuto = now()
-      if start() then S.msg = "Avto: sborka nachata" end
     end
     redraw()
     sleep(TICK)
@@ -847,20 +1047,17 @@ local function ui()
   while true do
     local e, a, x, y = os.pullEvent()
     if e == "monitor_touch" or e == "mouse_click" then
-      local t = e == "monitor_touch" and peripheral.wrap(a) or term
-      local _, h = t.getSize()
-      if y == h then
-        for _, b in ipairs(buttons) do if x >= b.x1 and x <= b.x2 then press(b.id) end end
+      local dev = e == "monitor_touch" and a or "term"
+      for _, b in ipairs(BTN[dev] or {}) do
+        if y == b.y and x >= b.x1 and x <= b.x2 then press(b.id, b.arg); break end
       end
       redraw()
-    elseif e == "key" and S.mode ~= "run" then
-      if a == keys.s then setup(); discover(); check()
-      elseif a == keys.enter then press("go")
-      elseif a == keys.up then press("plus")
-      elseif a == keys.down then press("minus") end
+    elseif e == "mouse_scroll" then
+      UI.scroll = math.max(0, UI.scroll + a * 3)
       redraw()
     elseif e == "peripheral" or e == "peripheral_detach" then
-      discover(); if S.mode ~= "run" then check() end
+      discover()
+      if UI.screen == "pick" then UI.cand = candidates() end
       redraw()
     end
   end
@@ -872,10 +1069,12 @@ if shell and not fs.exists("startup.lua") then
   local f = fs.open("startup.lua", "w")
   f.write('shell.run("' .. shell.getRunningProgram() .. '")\n'); f.close()
 end
-if #cfg.output == 0 then setup() end
 discover()
--- выгрузить остатки прошлой работы
-scan(); drain(); unloadDeployers()
-check()
+if cfg.active then
+  UI.screen = "work"; S.mode = "wait"; S.lastAuto = 0   -- заказ продолжается после перезапуска
+  UI.editQty = cfg.target > 0 and cfg.target or 1
+else
+  UI.screen = "menu"
+end
 redraw()
 parallel.waitForAny(worker, ui)

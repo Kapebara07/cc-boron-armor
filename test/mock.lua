@@ -392,8 +392,30 @@ sleep = function(t)
   if CHECK_DONE and CHECK_DONE() then error("DONE", 0) end
 end
 EVENTS = {}
+DUMPS = {}
+-- {"tap", "НАДПИСЬ", "текст в той же строке"} -> касание монитора по надписи на текущем экране
+local function findTap(label, rowText)
+  for y = 1, 38 do
+    local l = MON.lines[y] or ""
+    if (not rowText or l:find(rowText, 1, true)) then
+      local x = l:find(label, 1, true)
+      if x then return x, y end
+    end
+  end
+  error("na ekrane net knopki " .. label .. " / " .. tostring(rowText) .. "\n" .. MON.dump(), 0)
+end
 os.pullEvent = function()
-  if #EVENTS > 0 then return table.unpack(table.remove(EVENTS, 1)) end
+  while #EVENTS > 0 and EVENTS[1][1] == "dump" do
+    DUMPS[#DUMPS + 1] = MON.dump(); table.remove(EVENTS, 1)
+  end
+  if #EVENTS > 0 then
+    local e = table.remove(EVENTS, 1)
+    if e[1] == "tap" then
+      local x, y = findTap(e[2], e[3])
+      return "monitor_touch", "monitor_0", x, y
+    end
+    return table.unpack(e)
+  end
   coroutine.yield()
 end
 parallel = {waitForAny = function(w, u)
@@ -408,8 +430,11 @@ end}
 -- склад сценария
 for item, n in pairs(SCENARIO.raw or {}) do putInto(P["minecraft:chest_0"], item, n) end
 for item, n in pairs(SCENARIO.stock or {}) do putInto(P["minecraft:chest_1"], item, n) end
-FILES["armor.cfg"] = textutils.serialize({raw = {"minecraft:chest_0"}, stock = {"minecraft:chest_1"},
-  output = {"minecraft:chest_2"}, waste = {"minecraft:chest_3"}, basins = {}})
+if not SCENARIO.fresh then
+  FILES["armor.cfg"] = textutils.serialize({raw = {"minecraft:chest_0"}, stock = {"minecraft:chest_1"},
+    output = {"minecraft:chest_2"}, waste = {"minecraft:chest_3"}, basins = {},
+    active = true, target = SCENARIO.qty or 1, done = 0})
+end
 
 function COUNT(name, item)
   local c = 0
