@@ -1171,15 +1171,37 @@ local function drawStatus(t, dev)
   BTN[dev] = B   -- кнопки публикуем после отрисовки целиком
 end
 
-local function redraw()
-  for _, m in ipairs(M.monitors) do
-    local mon = peripheral.wrap(m)
-    if mon then
-      mon.setTextScale(0.5)
-      if m == STATUS_MON then drawStatus(mon, m) else draw(mon, m) end
-    end
+-- Кадр рисуется в невидимое окно и выводится целиком: пока рисуем, программа опрашивает
+-- баки и бассейны (это отдаёт управление), и без буфера экран мигал пустым.
+local WIN = {}
+local function frame(dev, target, fn)
+  local w, h = target.getSize()
+  local b = WIN[dev]
+  if not b or b.w ~= w or b.h ~= h or b.target ~= target then
+    b = {w = w, h = h, target = target, win = window.create(target, 1, 1, w, h, false)}
+    WIN[dev] = b
   end
-  draw(term, "term")
+  b.win.setVisible(false)
+  fn(b.win, dev)
+  b.win.setVisible(true)
+end
+
+local drawing, again = false, false
+local function redraw()
+  if drawing then again = true; return end   -- второй поток уже рисует: дорисует и он
+  drawing = true
+  repeat
+    again = false
+    for _, m in ipairs(M.monitors) do
+      local mon = peripheral.wrap(m)
+      if mon then
+        if mon.getTextScale() ~= 0.5 then mon.setTextScale(0.5) end
+        frame(m, mon, m == STATUS_MON and drawStatus or draw)
+      end
+    end
+    frame("term", term.native(), draw)
+  until not again
+  drawing = false
 end
 
 ---------------------------------------------------------------- запуск заходов

@@ -55,11 +55,24 @@ local function mkTerm(w, h)
   end
   function t.setTextColor() end
   function t.setBackgroundColor() end
-  function t.setTextScale() end
+  function t.setTextScale(v) t.scale = v; SCALE_CALLS = (SCALE_CALLS or 0) + 1 end
+  function t.getTextScale() return t.scale or 1 end
   function t.dump() local o = {} for i = 1, h do o[#o + 1] = (t.lines[i] or ""):gsub("%s+$", "") end return table.concat(o, "\n") end
   return t
 end
 term = mkTerm(51, 19)
+term.native = function() return term end
+-- окно-буфер CC: рисуем в своё, на setVisible(true) переносим на родителя
+window = {create = function(parent, x, y, w, h)
+  local win = mkTerm(w, h)
+  function win.setVisible(v)
+    if v then
+      for i = 1, h do parent.lines[i] = win.lines[i] end
+      FRAMES = (FRAMES or 0) + 1
+    end
+  end
+  return win
+end}
 local MON = mkTerm(79, 38)
 LEFTMON = mkTerm(LEFT_W or 57, LEFT_H or 38)
 print = function(...) end
