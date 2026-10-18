@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v12"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v13"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -1077,6 +1077,7 @@ local function draw(t, dev)
       B[#B + 1] = {x1 = 1, x2 = w, y = y, id = "toggledep", arg = d.name}
     end
     if #M.deployer == 0 then put(2, 4, "No deployers in the network. Put a modem on them and right-click it.", colors.red) end
+    if S.msg ~= "" then put(1, h - 1, " " .. S.msg, colors.orange) end
     local x = btn(1, h, "^", colors.gray, "up")
     btn(x, h, "v", colors.gray, "down")
     btn(w - 9, h, "DONE", colors.green, "back")
@@ -1099,6 +1100,7 @@ local function draw(t, dev)
         on and colors.black or colors.white, on and colors.green or nil)
       B[#B + 1] = {x1 = 1, x2 = w, y = y, id = "togglejob", arg = r.id}
     end
+    if S.msg ~= "" then put(1, h - 1, " " .. S.msg, colors.orange) end
     btn(w - 9, h, "DONE", colors.green, "back")
 
   elseif UI.screen == "list" then
@@ -1461,18 +1463,23 @@ local function press(id, arg)
     local list = cfg.lines[UI.belt]
     if inList(list, arg) then
       for i, n in ipairs(list) do if n == arg then table.remove(list, i) break end end
+      S.msg = short(arg) .. " removed from " .. short(UI.belt)
     else
       for _, other in pairs(cfg.lines) do         -- развёртыватель стоит над одной лентой
         for i, n in ipairs(other) do if n == arg then table.remove(other, i) break end end
       end
       list[#list + 1] = arg
+      S.msg = short(arg) .. " added to " .. short(UI.belt)
     end
     saveCfg(); discover()
   elseif id == "depot" then
     cfg.depots[arg] = cfg.depots[arg] ~= "press" and "press" or nil
+    S.msg = short(arg) .. ": " .. (cfg.depots[arg] and "PRESS" or "WASH")
     saveCfg(); discover()
   elseif id == "jobs" then UI.belt = arg; UI.screen = "pickjobs"
-  elseif id == "jobsall" then cfg.lineJobs[UI.belt] = nil; saveCfg(); discover()
+  elseif id == "jobsall" then
+    cfg.lineJobs[UI.belt] = nil; saveCfg(); discover()
+    S.msg = "JOBS " .. short(UI.belt) .. ": all jobs"
   elseif id == "togglejob" then
     local jobs = cfg.lineJobs[UI.belt]
     if jobs == nil then      -- из «все» в выбор: снимаем только нажатую
@@ -1481,6 +1488,7 @@ local function press(id, arg)
     end
     if jobs[arg] then jobs[arg] = nil else jobs[arg] = true end
     cfg.lineJobs[UI.belt] = jobs
+    S.msg = "JOBS " .. short(UI.belt) .. ": " .. iname(byId[arg].main) .. (jobs[arg] and " on" or " off")
     saveCfg(); discover()
   elseif id == "list" then UI.scroll = 0; UI.screen = "list"
   elseif id == "up" then UI.scroll = math.max(0, UI.scroll - 5)
@@ -1575,6 +1583,14 @@ local function ui()
   end
 end
 
+-- одна копия программы на компьютер: вкладки multishell делят _G, две копии
+-- рисовали бы на одних мониторах и обе ловили бы каждое касание (переключатели «не нажимались»)
+if _G.__boron_running then
+  print("boron is already running (another tab of this computer). Close it first.")
+  return
+end
+_G.__boron_running = true
+
 loadCfg()
 -- автозапуск при включении компьютера (после рестарта сервера тоже)
 if shell and not fs.exists("startup.lua") then
@@ -1589,4 +1605,6 @@ else
   UI.screen = "menu"
 end
 redraw()
-parallel.waitForAny(worker, ui)
+local ok, err = pcall(parallel.waitForAny, worker, ui)
+_G.__boron_running = nil     -- вышли (ошибка, Ctrl+T) - можно запускать снова
+if not ok then error(err, 0) end
