@@ -26,18 +26,13 @@ SKIP = {
     'arcon:industrial_furnace/recycle_damaged_armor',
     'create:crushing/iron_horse_armor',
 }
-VANILLA_RU = {
-    'minecraft:iron_ingot': 'Железный слиток', 'minecraft:iron_nugget': 'Железный самородок',
-    'minecraft:coal': 'Уголь', 'minecraft:charcoal': 'Древесный уголь', 'minecraft:raw_iron': 'Рудное железо',
-    'minecraft:raw_iron_block': 'Блок рудного железа', 'minecraft:iron_ore': 'Железная руда',
-    'minecraft:deepslate_iron_ore': 'Глубинная железная руда', 'minecraft:redstone': 'Редстоун',
-    'minecraft:clay_ball': 'Комок глины', 'minecraft:sand': 'Песок', 'minecraft:obsidian': 'Обсидиан',
-    'minecraft:crying_obsidian': 'Плачущий обсидиан', 'minecraft:magma_block': 'Магмовый блок', 'minecraft:amethyst_shard': 'Осколок аметиста',
-    'minecraft:cobblestone': 'Булыжник', 'minecraft:coal_ore': 'Угольная руда',
-    'minecraft:deepslate_coal_ore': 'Глубинная угольная руда', 'minecraft:cobbled_deepslate': 'Глубинный булыжник',
-}
-
-recipes, ru = {}, dict(VANILLA_RU)
+# английские названия: из en_us модов + ванильный en_us из клиентского jar
+VANILLA_JAR = r'C:/Users/timur/Downloads/Install/libraries/net/minecraft/client/1.21.1-20240808.144430/client-1.21.1-20240808.144430-extra.jar'
+recipes, title = {}, {}
+for k, v in json.loads(zipfile.ZipFile(VANILLA_JAR).read('assets/minecraft/lang/en_us.json')).items():
+    km = re.match(r'(?:item|block)\.minecraft\.(\w+)$', k)
+    if km:
+        title.setdefault('minecraft:' + km.group(1), v)
 for jar in JARS:
     z = zipfile.ZipFile(jar)
     for n in z.namelist():
@@ -49,12 +44,12 @@ for jar in JARS:
                 continue
             if d.get('type') in STATION and 'neoforge:conditions' not in d:
                 recipes[m.group(1) + ':' + m.group(2)] = d
-        m = re.match(r'assets/(\w+)/lang/ru_ru\.json$', n)
+        m = re.match(r'assets/(\w+)/lang/en_us\.json$', n)
         if m:
             for k, v in json.loads(z.read(n)).items():
                 km = re.match(r'(?:item|block)\.(\w+)\.(\w+)$', k)
                 if km:
-                    ru.setdefault(km.group(1) + ':' + km.group(2), v)
+                    title.setdefault(km.group(1) + ':' + km.group(2), v)
 
 def is_fluid(x):
     return isinstance(x, dict) and 'fluid' in x
@@ -114,21 +109,6 @@ def walk(item):
             walk(s)
 walk(TARGET)
 
-TR = dict(zip('абвгдеёжзийклмнопрстуфхцчшщъыьэюя',
-              ['a','b','v','g','d','e','yo','zh','z','i','y','k','l','m','n','o','p','r','s','t','u','f','h','c','ch',
-               'sh','sch','','y','','e','yu','ya']))
-def translit(t):
-    # мониторы CC не умеют кириллицу — пишем латиницей
-    out = ''
-    for ch in t:
-        lo = ch.lower()
-        if lo in TR:
-            r = TR[lo]
-            out += r.capitalize() if ch != lo else r
-        else:
-            out += ch
-    return out
-
 def lua(v):
     if isinstance(v, str):
         return '"' + v.replace('\\', '\\\\').replace('"', '\\"') + '"'
@@ -165,13 +145,13 @@ for rid in order:
     out.append('  ' + lua(r) + ',')
 out.append('}')
 names = sorted(items | {o['item'] for rid in order for o in (res(x) for x in recipes[rid]['results'])})
-out.append('R.ru = {')
+out.append('R.names = {')
 for i in names:
-    out.append(f'  ["{i}"] = {lua(translit(ru.get(i, i)))},')
+    out.append(f'  ["{i}"] = {lua(title.get(i, i))},')
 out.append('}')
 out.append('return R')
 open(OUT, 'w', encoding='utf-8', newline='\n').write('\n'.join(out) + '\n')
 print(len(order), 'рецептов,', len(names), 'предметов')
 for i in names:
-    if i not in ru:
-        print('нет перевода:', i)
+    if i not in title:
+        print('нет названия:', i)
