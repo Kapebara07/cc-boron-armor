@@ -405,7 +405,17 @@ local function tickMachines()
     if SWAP_DEPLOYERS then d0, d1 = d1, d0 end
     local stations = {{"deploying", d0}, {"deploying", d1},
                       {"cutting"}, {"pressing"}}
-    for _, st in ipairs(stations) do
+    local held = false
+    for si, st in ipairs(stations) do
+     if not held and si >= (it.stage or 1) then
+      -- как в Create: ПУСТОЙ развёртыватель над лентой держит предмет, пока ему что-нибудь не дадут
+      if st[1] == "deploying" and not st[2].slots[1] and not NO_HOLD then
+        b.slots[1] = {name = item.name, count = 1, seq = item.seq, stage = si}
+        HELD = (HELD or 0) + 1
+        held = true
+      end
+     end
+     if not held and si >= (it.stage or 1) then
       -- начало сборки
       if not item.seq then
         for _, r in ipairs(R.list) do
@@ -443,9 +453,12 @@ local function tickMachines()
           end
         end
       end
+     end
     end
+    if not held then
     putInto(P[LN.out], item.name, 1)
-    if item.seq then
+    end
+    if not held and item.seq then
       -- сохранить прогресс полуфабриката в слоте
       local d = P[LN.out]
       for i = 9, 1, -1 do

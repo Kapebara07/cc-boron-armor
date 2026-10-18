@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v9"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v10"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -619,6 +619,31 @@ local function unloadDeployers(deps)
   end
 end
 
+-- Пустой развёртыватель над лентой ДЕРЖИТ предметы (так устроен Create), а с предметом, для которого
+-- нет рецепта, - пропускает. Поэтому ни один развёртыватель не оставляем пустым: кладём «заглушку» -
+-- 1 ненужный предмет (опыт, булыжник из побочки). Перед сборкой заглушка уходит, детали кончились -
+-- снова заглушка. Так и линия не встаёт, и развёртыватели в любом порядке не застревают.
+local function fillerSource()
+  for _, inv in ipairs(cfg.waste) do
+    for slot in pairs(call(inv, "list") or {}) do return inv, slot end
+  end
+  for _, inv in ipairs(sources()) do
+    for slot, it in pairs(call(inv, "list") or {}) do
+      if not useful[it.name] then return inv, slot end
+    end
+  end
+end
+local function fillDeployers()
+  S.noFiller = false
+  for _, d in ipairs(M.deployer) do
+    if isEmpty(d.name) then
+      local inv, slot = fillerSource()
+      if not inv then S.noFiller = true; return end
+      call(inv, "pushItems", d.name, slot, 1)
+    end
+  end
+end
+
 -- сколько заготовок линия может взять под рецепт с развёртывателями (0 = не может)
 local function lineCap(line, r)
   local n = #line.deps
@@ -711,6 +736,7 @@ local function dispatchLine()
       if new then progress() end
     end
   end
+  fillDeployers()
 end
 
 local function allDone()
@@ -1090,6 +1116,9 @@ local function draw(t, dev)
       bar(2, " CHECKING STORAGE...  (done " .. cfg.done .. " of " .. goal .. ")", colors.black, colors.lime)
     end
     if S.msg ~= "" then put(1, h - 3, " " .. S.msg, colors.orange) end
+    if S.noFiller then
+      put(1, h - 4, " ! Deployers need a filler: put a few cobblestone (any junk) into BYPRODUCTS", colors.red)
+    end
     machinesLine(h - 2)
     btn(1, h, "STOP", colors.red, "stop")
   end
@@ -1177,6 +1206,9 @@ local function drawStatus(t, dev)
   for _, line in ipairs(M.lines) do
     item(#line.deps >= 2, "Line " .. tiny(line.belt), line.deps,
       #line.deps < 2 and ("deployers " .. #line.deps .. " of 2 (menu > lines > SET)") or nil)
+  end
+  if S.noFiller then
+    item(false, "Deployer filler", nil, "empty deployers hold the belt: put a few cobblestone (any junk) into BYPRODUCTS")
   end
   item(#M.buffers >= 3 and true or "warn", "Receivers (" .. #M.buffers .. ")", M.buffers,
     #M.buffers < 3 and "need: chest in front of furnace, hopper under crusher, receiver at belt end" or nil)
