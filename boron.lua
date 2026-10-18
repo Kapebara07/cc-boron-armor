@@ -2,6 +2,8 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
+local VERSION = "v8"   -- видна на экранах: так понятно, что обновление встало
+local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
 local CFG_FILE = fs.combine(DIR, "armor.cfg")
@@ -962,7 +964,9 @@ local function draw(t, dev)
     for _, n in ipairs(M.tanks) do add(n, "tank: " .. fluidIn(n, "minecraft:water") .. " mB water") end
     for _, n in ipairs(M.buffers) do add(n, "receiver (emptied by the PC)") end
     for _, n in ipairs(M.ignored) do add(n, "not used") end
-    for _, n in ipairs(M.monitors) do add(n, "monitor") end
+    for _, n in ipairs(M.monitors) do
+      add(n, n == STATUS_MON and "monitor (connections screen)" or "monitor (menu)")
+    end
     local lines = h - 3
     UI.scroll = math.max(0, math.min(UI.scroll, math.max(0, #rows - lines)))
     for i = 1, lines do
@@ -1061,11 +1065,11 @@ local function draw(t, dev)
     machinesLine(h - 2)
     btn(1, h, "STOP", colors.red, "stop")
   end
+  put(w - #VERSION, 1, VERSION, colors.lightGray, colors.gray)
   BTN[dev] = B   -- кнопки публикуем после отрисовки целиком
 end
 
 -- монитор слева от компьютера: чек-лист «что подключено, а что нет»
-local STATUS_MON = "left"
 local function drawStatus(t, dev)
   local w, h = t.getSize()
   local B = {}
@@ -1093,6 +1097,7 @@ local function drawStatus(t, dev)
   local function tiny(n) return (n:gsub("^%w+:", "")) end
   t.setCursorPos(1, 1); t.setBackgroundColor(colors.gray); t.write(string.rep(" ", w))
   put(1, " CONNECTIONS", colors.white, colors.gray)
+  put(w - #VERSION, VERSION, colors.lightGray, colors.gray)
   y = 3
   local allOk = true
   -- state: true = OK, false = NET, "warn" = zhyoltoe preduprezhdenie
@@ -1177,13 +1182,23 @@ local WIN = {}
 local function frame(dev, target, fn)
   local w, h = target.getSize()
   local b = WIN[dev]
-  if not b or b.w ~= w or b.h ~= h or b.target ~= target then
-    b = {w = w, h = h, target = target, win = window.create(target, 1, 1, w, h, false)}
+  if not b or b.w ~= w or b.h ~= h then
+    b = {w = w, h = h, win = window.create(target, 1, 1, w, h, false)}
     WIN[dev] = b
   end
   b.win.setVisible(false)
   fn(b.win, dev)
-  b.win.setVisible(true)
+  -- содержимое не поменялось - монитор не трогаем вовсе (иначе он перерисовывается и мигает)
+  local sig = {}
+  for y = 1, h do
+    local t, f, bg = b.win.getLine(y)
+    sig[#sig + 1] = t .. f .. bg
+  end
+  sig = table.concat(sig, "\n")
+  if sig ~= b.last then
+    b.win.setVisible(true)
+    b.last = sig
+  end
 end
 
 local drawing, again = false, false

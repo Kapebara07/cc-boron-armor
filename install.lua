@@ -1,15 +1,28 @@
 -- Установщик/обновлятор автозавода Карбид-борной брони.
 -- В компьютере: wget run https://raw.githubusercontent.com/Kapebara07/cc-boron-armor/main/install.lua
-local BASE = "https://raw.githubusercontent.com/Kapebara07/cc-boron-armor/main/"
+local REPO = "Kapebara07/cc-boron-armor"
 local FILES = {"boron.lua", "recipes.lua"}
 
+-- Берём файлы по номеру последнего коммита: ссылка на "main" кэшируется GitHub до 5 минут,
+-- и сразу после обновления можно было скачать старую версию.
+local ref = "main"
+local api = http.get("https://api.github.com/repos/" .. REPO .. "/commits/main",
+  {["User-Agent"] = "cc-boron-armor", ["Accept"] = "application/vnd.github+json"})
+if api then
+  local ok, data = pcall(textutils.unserializeJSON, api.readAll())
+  api.close()
+  if ok and type(data) == "table" and type(data.sha) == "string" then ref = data.sha end
+end
+print("Version source: " .. (ref == "main" and "main (cache possible)" or ref:sub(1, 7)))
+local BASE = "https://raw.githubusercontent.com/" .. REPO .. "/" .. ref .. "/"
+
 for _, f in ipairs(FILES) do
-  -- ?t= обходит кэш raw.githubusercontent.com после обновлений
   local h, err = http.get({url = BASE .. f .. "?t=" .. os.epoch("utc"), binary = true})
   if not h then error("Failed to download " .. f .. ": " .. tostring(err), 0) end
   local data = h.readAll(); h.close()
   local out = fs.open(f, "wb"); out.write(data); out.close()
-  print("OK " .. f .. " (" .. #data .. " bytes)")
+  local v = data:match('local VERSION = "([^"]+)"')
+  print("OK " .. f .. " (" .. #data .. " bytes)" .. (v and (", " .. v) or ""))
 end
 
 -- автозапуск; чужой startup.lua сохраняем рядом

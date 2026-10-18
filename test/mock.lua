@@ -55,6 +55,11 @@ local function mkTerm(w, h)
   end
   function t.setTextColor() end
   function t.setBackgroundColor() end
+  function t.getLine(y)
+    local l = t.lines[y] or ""
+    l = l .. string.rep(" ", w - #l)
+    return l, string.rep("0", w), string.rep("f", w)
+  end
   function t.setTextScale(v) t.scale = v; SCALE_CALLS = (SCALE_CALLS or 0) + 1 end
   function t.getTextScale() return t.scale or 1 end
   function t.dump() local o = {} for i = 1, h do o[#o + 1] = (t.lines[i] or ""):gsub("%s+$", "") end return table.concat(o, "\n") end
