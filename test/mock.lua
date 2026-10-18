@@ -142,7 +142,15 @@ local function addPeripheral(name, inv)
 end
 
 peripheral = {
-  getNames = function() local o = {} for n in pairs(P) do o[#o + 1] = n end table.sort(o) return o end,
+  getNames = function()
+    local o = {}
+    for n in pairs(P) do
+      -- FLAP: эти машины «моргают» в сети каждую вторую секунду, как машины Create с модемом
+      if not (FLAP and FLAP[n] and T % 2 == 1) then o[#o + 1] = n end
+    end
+    table.sort(o)
+    return o
+  end,
   hasType = function(n, t)
     if t == "monitor" then return n == "monitor_0" or n == "left" end
     if t == "fluid_storage" then return P[n] ~= nil and P[n].tanks ~= nil end
@@ -453,6 +461,12 @@ sleep = function(t)
   for _ = 1, math.max(1, t) do
     T = T + 1
     tickMachines()
+    -- «моргающие» машины шлют события, как в CC (модем отключил/подключил блок)
+    if FLAP then
+      for n in pairs(FLAP) do
+        EVENTS[#EVENTS + 1] = {T % 2 == 1 and "peripheral_detach" or "peripheral", n}
+      end
+    end
   end
   if T > LIMIT then error("LIMIT", 0) end
   if CHECK_DONE and CHECK_DONE() then error("DONE", 0) end

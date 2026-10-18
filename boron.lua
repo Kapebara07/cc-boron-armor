@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v8"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v9"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -33,6 +33,12 @@ end
 
 local FLUID_NAMES = {["minecraft:water"] = "Water (mB)", ["minecraft:lava"] = "Lava (mB)"}
 local function iname(i) return R.names[i] or FLUID_NAMES[i] or i end
+local function sortedKeys(t)
+  local k = {}
+  for x in pairs(t or {}) do k[#k + 1] = x end
+  table.sort(k)
+  return k
+end
 local function call(p, m, ...)
   local ok, a, b = pcall(peripheral.call, p, m, ...)
   if ok then return a, b end
@@ -195,12 +201,16 @@ local function isStorage(n)
 end
 
 local M
+local LASTSEEN = {}   -- имя периферии -> когда последний раз была в сети
+local GRACE = 5       -- сек: столько «помним» пропавшую машину
 local function discover()
   -- собираем заново в N и подменяем M целиком: обращения к периферии отдают управление
   -- другому потоку (экрану), и он не должен увидеть недособранный список
   local N = {crush = {}, wash = {}, mill = {}, basin = {}, furnace = {}, furnaceOut = {}, deployer = {}, belt = {},
        buffers = {}, ignored = {}, monitors = {}, tanks = {}}
+  local here = {}
   for _, n in ipairs(peripheral.getNames()) do
+    here[n] = true
     local b = baseName(n)
     local k = KIND[b]
     if peripheral.hasType(n, "monitor") then
@@ -222,9 +232,27 @@ local function discover()
     -- баки: любое хранилище жидкости, кроме машин (Create Fluid Tank, шланговый шкив и т.п.)
     if not k and not IGNORE[b] and peripheral.hasType(n, "fluid_storage") then table.insert(N.tanks, n) end
   end
+  -- машины Create иногда на миг «переподключаются» (модем заново спрашивает блок); такие короткие
+  -- пропадания не считаем, иначе экран мигает [ NO ] / [ OK ] и работа дёргается
+  local t = os.epoch("utc") / 1000
+  for n in pairs(here) do LASTSEEN[n] = t end
+  if M then
+    for cat, list in pairs(M) do
+      if N[cat] and cat ~= "lines" then
+        for _, e in ipairs(list) do
+          local n = type(e) == "table" and e.name or e
+          if not here[n] and LASTSEEN[n] and t - LASTSEEN[n] < GRACE then table.insert(N[cat], e) end
+        end
+      end
+    end
+  end
+  -- постоянный порядок: строки на экране не переставляются местами
+  for _, cat in pairs(N) do
+    table.sort(cat, function(a, c)
+      return (type(a) == "table" and a.name or a) < (type(c) == "table" and c.name or c)
+    end)
+  end
   for _, bs in ipairs(N.basin) do bs.role = cfg.basins[bs.name] end
-  table.sort(N.deployer, function(a, c) return a.name < c.name end)
-  table.sort(N.belt, function(a, c) return a.name < c.name end)
   -- линии: если лента одна и ничего не назначено — все развёртыватели её
   N.lines = {}
   local present = {}
@@ -997,7 +1025,7 @@ local function draw(t, dev)
       put(2, y, "Resources are enough for: " .. UI.canMake, UI.canMake > 0 and colors.lime or colors.red)
       y = y + 1
       if S.noMachine then
-        for k in pairs(S.noMachine) do put(4, y, "missing: " .. (STATION_RU[k] or k), colors.red); y = y + 1 end
+        for _, k in ipairs(sortedKeys(S.noMachine)) do put(4, y, "missing: " .. (STATION_RU[k] or k), colors.red); y = y + 1 end
       end
       if UI.canMake == 0 and S.missing then
         put(2, y, "Missing for 1 armor:", colors.red); y = y + 1
@@ -1040,7 +1068,7 @@ local function draw(t, dev)
       end
     elseif S.noMachine then
       bar(2, " MISSING MACHINES  (done " .. cfg.done .. " of " .. goal .. ")", colors.white, colors.red)
-      for k in pairs(S.noMachine) do
+      for _, k in ipairs(sortedKeys(S.noMachine)) do
         local txt = k == "storage" and "storages not selected (STOP > MENU)" or (STATION_RU[k] or k)
         put(3, y, txt, colors.red); y = y + 1
       end
@@ -1366,9 +1394,9 @@ local function ui()
       UI.scroll = math.max(0, UI.scroll + a * 3)
       redraw()
     elseif e == "peripheral" or e == "peripheral_detach" then
+      -- без немедленной перерисовки: экран обновится в обычном цикле раз в секунду
       discover()
       if UI.screen == "pick" then UI.cand = candidates() end
-      redraw()
     end
   end
 end
