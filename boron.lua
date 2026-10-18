@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v11"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v12"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -18,7 +18,7 @@ local PER_FURNACE = 16    -- партий в печь
 local BASIN_TRIAL = 40    -- сек: если бассейн за это время не тронул ингредиенты — у него другой механизм
 local STALL = 300         -- сек без прогресса -> предупреждение
 
-local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, lines = {}, lineJobs = {}, active = false, target = 1, done = 0}
+local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, lines = {}, lineJobs = {}, depots = {}, active = false, target = 1, done = 0}
 local AUTO_EVERY = 10     -- сек: как часто при работе проверять, хватает ли на следующую броню
 local MAX_BATCH = 4      -- сколько брони планировать за один заход
 local function loadCfg()
@@ -207,7 +207,7 @@ local function discover()
   -- собираем заново в N и подменяем M целиком: обращения к периферии отдают управление
   -- другому потоку (экрану), и он не должен увидеть недособранный список
   local N = {crush = {}, wash = {}, mill = {}, basin = {}, furnace = {}, furnaceOut = {}, deployer = {}, belt = {},
-       buffers = {}, ignored = {}, monitors = {}, tanks = {}}
+       buffers = {}, ignored = {}, monitors = {}, tanks = {}, pdep = {}}
   local here = {}
   for _, n in ipairs(peripheral.getNames()) do
     here[n] = true
@@ -222,6 +222,8 @@ local function discover()
         table.insert(N.furnace, {name = n})
         table.insert(N.furnaceOut, {name = n, from = 9})
       else table.insert(N.furnace, {name = n}) end
+    elseif k == "wash" and cfg.depots[n] == "press" then
+      table.insert(N.pdep, {name = n})        -- депо под прессом: листы и броневые плиты
     elseif k then
       table.insert(N[k], {name = n})
     elseif peripheral.hasType(n, "inventory") then
@@ -299,7 +301,7 @@ lackText = function(k)
   if k:sub(1, 5) == "line:" then
     local r = byId[k:sub(6)]
     return "no line for " .. (r and iname(r.main) or k) ..
-      ((r and r.base and #r.deploy > 0) and " (needs 2 deployers + JOBS)" or " (menu > lines > JOBS)")
+      ((r and r.base and #r.deploy > 0) and " (needs 2 deployers + JOBS)" or " (depot under a press, or a line)")
   end
   return STATION_RU[k] or k
 end
@@ -357,7 +359,7 @@ end
 
 ---------------------------------------------------------------- состояние производства
 local S = {mode = "idle", qty = 1, runs = {}, missing = nil, msg = "", startOut = 0, lastProgress = 0,
-           stall = nil, line = nil, basinJob = {}, washJob = {}, millJob = {}, lineJob = {}, furnaceJob = {}}
+           stall = nil, line = nil, basinJob = {}, washJob = {}, millJob = {}, pdepJob = {}, lineJob = {}, furnaceJob = {}}
 local function now() return os.epoch("utc") / 1000 end
 
 local function countOutput()
@@ -426,6 +428,12 @@ local function drain()
   end
   for _, d in ipairs(M.mill) do
     local keep = inputsOf(S.millJob[d.name])
+    for slot, it in pairs(call(d.name, "list") or {}) do
+      if not keep[it.name] then routeItem(d.name, slot, it); progress() end
+    end
+  end
+  for _, d in ipairs(M.pdep) do
+    local keep = inputsOf(S.pdepJob[d.name])
     for slot, it in pairs(call(d.name, "list") or {}) do
       if not keep[it.name] then routeItem(d.name, slot, it); progress() end
     end
@@ -655,6 +663,33 @@ local function fillDeployers()
   end
 end
 
+-- сборка, где работает только пресс (листы, броневая плита)
+local function pressOnly(r)
+  return r.station == "line" and (not r.base or #r.deploy == 0)
+end
+-- есть депо под прессом - листы и плиты делаются только на них, ленты заняты сборками
+local function pressOnDepots(r) return pressOnly(r) and #M.pdep > 0 end
+
+-- депо под прессом: по одной заготовке; плита прессуется 3 раза прямо на депо, готовое забираем
+local function dispatchPressDepots()
+  for _, d in ipairs(M.pdep) do
+    if isEmpty(d.name) then
+      S.pdepJob[d.name] = nil
+      for _, r in ipairs(runsFor("line")) do
+        if pressOnly(r) then
+          local choice = pickAlts(r, 1)
+          if choice and give(choice[1], 1, d.name) == 1 then
+            S.runs[r.id] = S.runs[r.id] - 1
+            S.pdepJob[d.name] = r
+            progress()
+            break
+          end
+        end
+      end
+    end
+  end
+end
+
 -- линия делает эту сборку? (в меню JOBS; по умолчанию - все)
 local function lineAllows(line, r)
   return line.jobs == nil or line.jobs[r.id] == true
@@ -722,7 +757,7 @@ local function dispatchLine()
   end
   -- сборки только с прессом (броневая плита) — без развёртывателей, на любой линии
   for _, r in ipairs(runsFor("line")) do
-    if r.base and #r.deploy == 0 and not S.seqPress[r.id] then
+    if r.base and #r.deploy == 0 and not S.seqPress[r.id] and not pressOnDepots(r) then
       local choice, k = pickAlts(r, S.runs[r.id])
       if choice then
         S.runs[r.id] = S.runs[r.id] - k
@@ -748,7 +783,7 @@ local function dispatchLine()
       end
       if not fed then
         for _, r in ipairs(runsFor("line")) do
-          if not r.base and lineAllows(line, r) and have(r.ingr[1].alts[1]) > 0
+          if not r.base and lineAllows(line, r) and not pressOnDepots(r) and have(r.ingr[1].alts[1]) > 0
              and give(r.ingr[1].alts[1], 1, line.belt) == 1 then
             S.runs[r.id] = S.runs[r.id] - 1; fed = true; new = true; break
           end
@@ -781,13 +816,13 @@ local function check()
   for rid, n in pairs(res) do
     local r = byId[rid]
     if n > 0 and r.station == "line" then
-      local ok = false
+      local ok = pressOnDepots(r)
       for _, line in ipairs(M.lines) do
         if r.base and #r.deploy > 0 then
           if lineCap(line, r) > 0 then ok = true end
         elseif lineAllows(line, r) then ok = true end
       end
-      if not ok and #M.lines > 0 then lack["line:" .. rid] = true end
+      if not ok and (#M.lines > 0 or pressOnly(r)) then lack["line:" .. rid] = true end
     end
     if n > 0 and r.station == "mix" then needMix = true end
     if n > 0 and r.station == "compact" then needCompact = true end
@@ -955,6 +990,19 @@ local function draw(t, dev)
       y = y + 1
     end
     y = y + gap
+    put(1, y, " Depots (WASH = in front of a fan with water, PRESS = under a press):", colors.yellow); y = y + 1
+    if #M.wash + #M.pdep == 0 then put(2, y, "- no depots in the network -", colors.red); y = y + 1 end
+    local deps = {}
+    for _, d in ipairs(M.wash) do deps[#deps + 1] = d.name end
+    for _, d in ipairs(M.pdep) do deps[#deps + 1] = d.name end
+    table.sort(deps)
+    for _, n in ipairs(deps) do
+      local press = cfg.depots[n] == "press"
+      put(2, y, short(n), colors.white)
+      btn(w - 9, y, press and "PRESS " or "WASH  ", press and colors.cyan or colors.gray, "depot", n)
+      y = y + 1
+    end
+    y = y + gap
     put(1, y, " Assembly lines (DEP = its deployers, JOBS = what it makes):", colors.yellow); y = y + 1
     if #M.lines == 0 then put(2, y, "- no belt in the network -", colors.red); y = y + 1 end
     for _, line in ipairs(M.lines) do
@@ -1062,6 +1110,7 @@ local function draw(t, dev)
     for _, x in ipairs(M.crush) do add(x.name, "crushing wheels") end
     for _, x in ipairs(M.mill) do add(x.name, "millstone") end
     for _, x in ipairs(M.wash) do add(x.name, "washing (depot)") end
+    for _, x in ipairs(M.pdep) do add(x.name, "depot under a press (sheets, armor plates)") end
     for _, x in ipairs(M.basin) do
       add(x.name, "basin: " .. (x.role == "mix" and "mixer" or (x.role == "compact" and "press" or "auto-detect")))
     end
@@ -1253,7 +1302,9 @@ local function drawStatus(t, dev)
   item(#M.crush > 0, "Crushing wheels", namesOf(M.crush),
     #M.crush == 0 and "modem next to the controller (between the wheels)" or nil)
   item(#M.mill > 0, "Millstone", namesOf(M.mill))
-  item(#M.wash > 0, "Washing (depot)", namesOf(M.wash))
+  item(#M.wash > 0, "Washing (depot)", namesOf(M.wash),
+    #M.wash == 0 and "depot in front of a fan blowing through water (menu: WASH)" or nil)
+  if #M.pdep > 0 then item(true, "Press depots (sheets, plates)", namesOf(M.pdep)) end
   item(#M.basin >= 2 and #mixN > 0, "Basin with mixer", mixN,
     #M.basin < 2 and "need 2 basins (mixer + press)" or nil)
   item(#M.basin >= 2 and #pressN > 0, "Basin with press", pressN)
@@ -1274,11 +1325,14 @@ local function drawStatus(t, dev)
   end
   -- каждой сборке нужна линия
   for _, r in ipairs(LINE_RECIPES) do
-    local ok = false
+    local ok = pressOnDepots(r)
     for _, line in ipairs(M.lines) do
       if lineAllows(line, r) and (#line.deps >= (r.base and #r.deploy > 0 and 1 or 0)) then ok = true end
     end
-    if not ok and #M.lines > 0 then item(false, "Line for " .. iname(r.main), nil, "menu > lines > JOBS") end
+    if not ok and (#M.lines > 0 or pressOnly(r)) then
+      item(false, "Line for " .. iname(r.main), nil,
+        pressOnly(r) and "a depot under a press (menu: PRESS) or a line with this job" or "menu > lines > JOBS")
+    end
   end
   if S.noFiller then
     item(false, "Deployer filler", nil, "empty deployers hold the belt: put a few cobblestone (any junk) into BYPRODUCTS")
@@ -1414,6 +1468,9 @@ local function press(id, arg)
       list[#list + 1] = arg
     end
     saveCfg(); discover()
+  elseif id == "depot" then
+    cfg.depots[arg] = cfg.depots[arg] ~= "press" and "press" or nil
+    saveCfg(); discover()
   elseif id == "jobs" then UI.belt = arg; UI.screen = "pickjobs"
   elseif id == "jobsall" then cfg.lineJobs[UI.belt] = nil; saveCfg(); discover()
   elseif id == "togglejob" then
@@ -1468,6 +1525,7 @@ local function worker()
         scan()
         dispatchSimple("crush", M.crush, PER_CRUSH, nil)
         dispatchSimple("wash", M.wash, PER_WASH, S.washJob)
+        dispatchPressDepots()
         dispatchSimple("mill", M.mill, PER_MILL, S.millJob)
         dispatchFurnace()
         dispatchBasins()

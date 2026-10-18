@@ -258,7 +258,28 @@ end
 USED = {}   -- сколько партий сделала каждая машина
 local function markUsed(n) USED[n] = (USED[n] or 0) + 1 end
 
+-- депо под прессом (PDEP = true): create:depot_2, по нажатию в секунду
+if PDEP then addPeripheral("create:depot_2", newInv(9, {inputSlots = {[1] = true}})) end
+
 local function tickMachines()
+  if PDEP then
+    local d = P["create:depot_2"]; local s = d.slots[1]
+    if s then
+      for _, r in ipairs(recipesOf("line")) do
+        if not r.base and r.ins[1][1] == s.name then
+          d.slots[1] = {name = r.outs[1].item, count = s.count}; markUsed("create:depot_2"); break
+        elseif r.base and #r.deploy == 0 and (r.base[1] == s.name or r.transitional == s.name) then
+          -- сборка только прессом: каждое нажатие - один цикл, после последнего готовая плита
+          local q = s.seq or {loop = 0}
+          q.loop = q.loop + 1
+          markUsed("create:depot_2")
+          if q.loop >= r.loops then d.slots[1] = {name = r.outs[1].item, count = 1}
+          else d.slots[1] = {name = r.transitional, count = 1, seq = q} end
+          break
+        end
+      end
+    end
+  end
   -- дробилки: 1 предмет/сек
   for _, cr in ipairs(CRUSHERS) do
     local c = P[cr.ctrl]
@@ -538,7 +559,7 @@ for item, n in pairs(SCENARIO.stock or {}) do putInto(P["minecraft:chest_1"], it
 if not SCENARIO.fresh then
   FILES["armor.cfg"] = textutils.serialize({raw = {"minecraft:chest_0"}, stock = {"minecraft:chest_1"},
     output = {"minecraft:chest_2"}, waste = {"minecraft:chest_3"}, basins = {},
-    lines = SCENARIO.lines or {}, lineJobs = SCENARIO.lineJobs or {},
+    lines = SCENARIO.lines or {}, lineJobs = SCENARIO.lineJobs or {}, depots = SCENARIO.depots or {},
     active = true, target = SCENARIO.qty or 1, done = 0})
 end
 
