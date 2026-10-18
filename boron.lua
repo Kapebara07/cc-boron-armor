@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v13"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v14"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -1563,9 +1563,22 @@ local function worker()
   end
 end
 
+-- В CC, пока поток ждёт ответа блока, пришедшие нажатия теряются. Поэтому этот поток
+-- только складывает события в очередь (ни одного обращения к блокам), а разбирает их uiWorker.
+local QUEUE = {}
 local function ui()
   while true do
-    local e, a, x, y = os.pullEvent()
+    local ev = {os.pullEvent()}
+    local e = ev[1]
+    if e == "monitor_touch" or e == "mouse_click" or e == "mouse_scroll"
+       or e == "peripheral" or e == "peripheral_detach" then
+      QUEUE[#QUEUE + 1] = ev
+      os.queueEvent("boron_ui")
+    end
+  end
+end
+local function handle(ev)
+    local e, a, x, y = ev[1], ev[2], ev[3], ev[4]
     if e == "monitor_touch" or e == "mouse_click" then
       local dev = e == "monitor_touch" and a or "term"
       for _, b in ipairs(BTN[dev] or {}) do
@@ -1580,6 +1593,12 @@ local function ui()
       discover()
       if UI.screen == "pick" then UI.cand = candidates() end
     end
+end
+
+local function uiWorker()
+  while true do
+    while #QUEUE > 0 do handle(table.remove(QUEUE, 1)) end
+    os.pullEvent("boron_ui")
   end
 end
 
@@ -1605,6 +1624,6 @@ else
   UI.screen = "menu"
 end
 redraw()
-local ok, err = pcall(parallel.waitForAny, worker, ui)
+local ok, err = pcall(parallel.waitForAny, worker, ui, uiWorker)
 _G.__boron_running = nil     -- вышли (ошибка, Ctrl+T) - можно запускать снова
 if not ok then error(err, 0) end

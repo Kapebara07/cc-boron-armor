@@ -518,7 +518,9 @@ local function findTap(label, rowText)
   end
   return nil
 end
-os.pullEvent = function()
+os.queueEvent = function() end
+os.pullEvent = function(filter)
+  if filter then coroutine.yield(); return nil end
   while #EVENTS > 0 and EVENTS[1][1] == "dump" do
     DUMPS[#DUMPS + 1] = MON.dump(); table.remove(EVENTS, 1)
   end
