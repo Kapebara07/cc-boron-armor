@@ -133,6 +133,9 @@ peripheral = {
   call = function(n, m, ...)
     local p = P[n]
     if not p then error("no peripheral " .. n) end
+    -- как в CC: обращение к блоку отдаёт управление другим потокам (parallel)
+    local _, main = coroutine.running()
+    if not main and not NO_YIELD then coroutine.yield() end
     if m == "size" then return p.size end
     return p[m](...)
   end,
@@ -447,7 +450,7 @@ local function findTap(label, rowText)
       if x then return x, y end
     end
   end
-  error("na ekrane net knopki " .. label .. " / " .. tostring(rowText) .. "\n" .. MON.dump(), 0)
+  return nil
 end
 os.pullEvent = function()
   while #EVENTS > 0 and EVENTS[1][1] == "dump" do
@@ -457,19 +460,31 @@ os.pullEvent = function()
     local e = table.remove(EVENTS, 1)
     if e[1] == "tap" then
       local x, y = findTap(e[2], e[3])
+      if not x then
+        -- экран ещё перерисовывается: ждём, как живой человек
+        e.tries = (e.tries or 0) + 1
+        if e.tries > 500 then error("na ekrane net knopki " .. e[2] .. " / " .. tostring(e[3]) .. "\n" .. MON.dump(), 0) end
+        table.insert(EVENTS, 1, e)
+        coroutine.yield()
+        return nil
+      end
       return "monitor_touch", "monitor_0", x, y
     end
     return table.unpack(e)
   end
   coroutine.yield()
 end
-parallel = {waitForAny = function(w, u)
-  local co = coroutine.create(u)
-  repeat
-    local ok, err = coroutine.resume(co)
-    if not ok then error(err, 0) end
-  until #EVENTS == 0
-  w()
+-- настоящий планировщик: потоки по очереди, каждый отдаёт управление на обращении к блоку
+parallel = {waitForAny = function(...)
+  local cos = {}
+  for i, f in ipairs({...}) do cos[i] = coroutine.create(f) end
+  while true do
+    for _, co in ipairs(cos) do
+      if coroutine.status(co) == "dead" then return end
+      local ok, err = coroutine.resume(co)
+      if not ok then error(err, 0) end
+    end
+  end
 end}
 
 -- склад сценария

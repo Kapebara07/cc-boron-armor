@@ -194,56 +194,59 @@ end
 
 local M
 local function discover()
-  M = {crush = {}, wash = {}, mill = {}, basin = {}, furnace = {}, furnaceOut = {}, deployer = {}, belt = {},
+  -- собираем заново в N и подменяем M целиком: обращения к периферии отдают управление
+  -- другому потоку (экрану), и он не должен увидеть недособранный список
+  local N = {crush = {}, wash = {}, mill = {}, basin = {}, furnace = {}, furnaceOut = {}, deployer = {}, belt = {},
        buffers = {}, ignored = {}, monitors = {}, tanks = {}}
   for _, n in ipairs(peripheral.getNames()) do
     local b = baseName(n)
     local k = KIND[b]
     if peripheral.hasType(n, "monitor") then
-      table.insert(M.monitors, n)
+      table.insert(N.monitors, n)
     elseif k == "furnace" then
       local size = call(n, "size") or 0
-      if size == 4 then table.insert(M.furnaceOut, {name = n, from = 1})       -- модем на передней грани
+      if size == 4 then table.insert(N.furnaceOut, {name = n, from = 1})       -- модем на передней грани
       elseif size >= 12 then
-        table.insert(M.furnace, {name = n})
-        table.insert(M.furnaceOut, {name = n, from = 9})
-      else table.insert(M.furnace, {name = n}) end
+        table.insert(N.furnace, {name = n})
+        table.insert(N.furnaceOut, {name = n, from = 9})
+      else table.insert(N.furnace, {name = n}) end
     elseif k then
-      table.insert(M[k], {name = n})
+      table.insert(N[k], {name = n})
     elseif peripheral.hasType(n, "inventory") then
       if isStorage(n) then -- склады отдельно
-      elseif IGNORE[b] then table.insert(M.ignored, n)
-      else table.insert(M.buffers, n) end
+      elseif IGNORE[b] then table.insert(N.ignored, n)
+      else table.insert(N.buffers, n) end
     end
     -- баки: любое хранилище жидкости, кроме машин (Create Fluid Tank, шланговый шкив и т.п.)
-    if not k and not IGNORE[b] and peripheral.hasType(n, "fluid_storage") then table.insert(M.tanks, n) end
+    if not k and not IGNORE[b] and peripheral.hasType(n, "fluid_storage") then table.insert(N.tanks, n) end
   end
-  for _, bs in ipairs(M.basin) do bs.role = cfg.basins[bs.name] end
-  table.sort(M.deployer, function(a, c) return a.name < c.name end)
-  table.sort(M.belt, function(a, c) return a.name < c.name end)
+  for _, bs in ipairs(N.basin) do bs.role = cfg.basins[bs.name] end
+  table.sort(N.deployer, function(a, c) return a.name < c.name end)
+  table.sort(N.belt, function(a, c) return a.name < c.name end)
   -- линии: если лента одна и ничего не назначено — все развёртыватели её
-  M.lines = {}
+  N.lines = {}
   local present = {}
-  for _, d in ipairs(M.deployer) do present[d.name] = true end
-  for _, b in ipairs(M.belt) do
+  for _, d in ipairs(N.deployer) do present[d.name] = true end
+  for _, b in ipairs(N.belt) do
     local deps = {}
     if cfg.lines[b.name] then
       for _, d in ipairs(cfg.lines[b.name]) do if present[d] then deps[#deps + 1] = d end end
-    elseif #M.belt == 1 then
-      for _, d in ipairs(M.deployer) do deps[#deps + 1] = d.name end
+    elseif #N.belt == 1 then
+      for _, d in ipairs(N.deployer) do deps[#deps + 1] = d.name end
     end
-    M.lines[#M.lines + 1] = {belt = b.name, deps = deps, auto = cfg.lines[b.name] == nil}
+    N.lines[#N.lines + 1] = {belt = b.name, deps = deps, auto = cfg.lines[b.name] == nil}
   end
   -- бассейнов два, про один уже известно - второй, значит, другой
   local unknown, known = {}, {}
-  for _, bs in ipairs(M.basin) do
+  for _, bs in ipairs(N.basin) do
     if bs.role then known[bs.role] = true else unknown[#unknown + 1] = bs end
   end
-  if #unknown == 1 and #M.basin >= 2 and (known.mix ~= known.compact) then
+  if #unknown == 1 and #N.basin >= 2 and (known.mix ~= known.compact) then
     unknown[1].role = known.mix and "compact" or "mix"
     cfg.basins[unknown[1].name] = unknown[1].role
     saveCfg()
   end
+  M = N
 end
 
 local function stationCount(kind)
@@ -269,16 +272,17 @@ local function sources()
   return t
 end
 local function scan()
-  idx = {}
+  local new = {}
   local counts = {}
   for _, inv in ipairs(sources()) do
     local l = call(inv, "list") or {}
     for slot, it in pairs(l) do
-      idx[it.name] = idx[it.name] or {}
-      table.insert(idx[it.name], {inv = inv, slot = slot, count = it.count})
+      new[it.name] = new[it.name] or {}
+      table.insert(new[it.name], {inv = inv, slot = slot, count = it.count})
       counts[it.name] = (counts[it.name] or 0) + it.count
     end
   end
+  idx = new
   return counts
 end
 local function have(item)
@@ -805,7 +809,6 @@ end
 local function draw(t, dev)
   local w, h = t.getSize()
   local B = {}
-  BTN[dev] = B
   t.setBackgroundColor(colors.black); t.clear()
   local function put(x, y, s, fg, bg)
     if y < 1 or y > h then return end
@@ -1058,6 +1061,7 @@ local function draw(t, dev)
     machinesLine(h - 2)
     btn(1, h, "STOP", colors.red, "stop")
   end
+  BTN[dev] = B   -- кнопки публикуем после отрисовки целиком
 end
 
 -- монитор слева от компьютера: чек-лист «что подключено, а что нет»
@@ -1065,7 +1069,6 @@ local STATUS_MON = "left"
 local function drawStatus(t, dev)
   local w, h = t.getSize()
   local B = {}
-  BTN[dev] = B
   t.setBackgroundColor(colors.black); t.clear()
   local y = 1
   local function put(x, s, fg, bg)
@@ -1165,6 +1168,7 @@ local function drawStatus(t, dev)
   t.setCursorPos(w - 9, h); t.setBackgroundColor(colors.blue); t.setTextColor(colors.white); t.write(" REFRESH ")
   t.setBackgroundColor(colors.black)
   B[#B + 1] = {x1 = w - 9, x2 = w - 1, y = h, id = "refresh"}
+  BTN[dev] = B   -- кнопки публикуем после отрисовки целиком
 end
 
 local function redraw()
