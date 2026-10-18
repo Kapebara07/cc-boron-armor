@@ -127,7 +127,8 @@ peripheral = {
   getNames = function() local o = {} for n in pairs(P) do o[#o + 1] = n end table.sort(o) return o end,
   hasType = function(n, t)
     if t == "monitor" then return n == "monitor_0" or n == "left" end
-    return P[n] ~= nil and n ~= "monitor_0" and n ~= "left"
+    if t == "fluid_storage" then return P[n] ~= nil and P[n].tanks ~= nil end
+    return P[n] ~= nil and n ~= "monitor_0" and n ~= "left" and not P[n].isTank
   end,
   call = function(n, m, ...)
     local p = P[n]
@@ -187,6 +188,18 @@ addPeripheral("create:millstone_0", newInv(10, {inputSlots = {[1] = true}}))
 WATER = {["create:basin_1"] = NO_WATER and 0 or 1000, ["create:basin_0"] = 0}
 for n in pairs(BASIN_TRUTH) do
   P[n].tanks = function() return {{name = "minecraft:water", amount = WATER[n]}} end
+end
+-- бак с водой (TANK = мБ): ПК переливает из него в бассейн
+if TANK then
+  TANKW = TANK
+  addPeripheral("create:fluid_tank_0", newInv(0))
+  P["create:fluid_tank_0"].isTank = true
+  P["create:fluid_tank_0"].tanks = function() return {{name = "minecraft:water", amount = TANKW}} end
+  P["create:fluid_tank_0"].pushFluid = function(to, limit, fluid)
+    local m = math.min(limit or TANKW, TANKW, 1000 - WATER[to])
+    WATER[to] = WATER[to] + m; TANKW = TANKW - m
+    return m
+  end
 end
 -- печь: входной обработчик 8 слотов
 addPeripheral("arcon:furnace_multiblock_0", newInv(8))

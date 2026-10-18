@@ -29,7 +29,8 @@ local function saveCfg()
   local f = fs.open(CFG_FILE, "w"); f.write(textutils.serialize(cfg)); f.close()
 end
 
-local function iname(i) return R.names[i] or i end
+local FLUID_NAMES = {["minecraft:water"] = "Water (mB)", ["minecraft:lava"] = "Lava (mB)"}
+local function iname(i) return R.names[i] or FLUID_NAMES[i] or i end
 local function call(p, m, ...)
   local ok, a, b = pcall(peripheral.call, p, m, ...)
   if ok then return a, b end
@@ -194,7 +195,7 @@ end
 local M
 local function discover()
   M = {crush = {}, wash = {}, mill = {}, basin = {}, furnace = {}, furnaceOut = {}, deployer = {}, belt = {},
-       buffers = {}, ignored = {}, monitors = {}}
+       buffers = {}, ignored = {}, monitors = {}, tanks = {}}
   for _, n in ipairs(peripheral.getNames()) do
     local b = baseName(n)
     local k = KIND[b]
@@ -214,6 +215,8 @@ local function discover()
       elseif IGNORE[b] then table.insert(M.ignored, n)
       else table.insert(M.buffers, n) end
     end
+    -- баки: любое хранилище жидкости, кроме машин (Create Fluid Tank, шланговый шкив и т.п.)
+    if not k and not IGNORE[b] and peripheral.hasType(n, "fluid_storage") then table.insert(M.tanks, n) end
   end
   for _, bs in ipairs(M.basin) do bs.role = cfg.basins[bs.name] end
   table.sort(M.deployer, function(a, c) return a.name < c.name end)
@@ -231,6 +234,16 @@ local function discover()
     end
     M.lines[#M.lines + 1] = {belt = b.name, deps = deps, auto = cfg.lines[b.name] == nil}
   end
+  -- бассейнов два, про один уже известно - второй, значит, другой
+  local unknown, known = {}, {}
+  for _, bs in ipairs(M.basin) do
+    if bs.role then known[bs.role] = true else unknown[#unknown + 1] = bs end
+  end
+  if #unknown == 1 and #M.basin >= 2 and (known.mix ~= known.compact) then
+    unknown[1].role = known.mix and "compact" or "mix"
+    cfg.basins[unknown[1].name] = unknown[1].role
+    saveCfg()
+  end
 end
 
 local function stationCount(kind)
@@ -243,7 +256,7 @@ local function stationCount(kind)
   return #M[kind]
 end
 local STATION_RU = {crush = "crushing wheels", wash = "washing depot", mill = "millstone",
-  water = "water in the mixer basin (pipe from a pump)", mix = "basin with mixer",
+  water = "water: a tank with water in the network, or a pipe into the mixer basin", mix = "basin with mixer",
   compact = "basin with press", furnace = "industrial furnace", line = "assembly belt",
   deployer = "a line with 2 deployers (menu > assembly lines)"}
 
@@ -501,6 +514,22 @@ local function fluidBatches(basin, r, k)
   for _, f in ipairs(r.fluids or {}) do k = math.min(k, math.floor(fluidIn(basin, f.fluid) / f.amount)) end
   return k
 end
+-- сколько жидкости во всех баках сети
+local function tankFluid(fluid)
+  local c = 0
+  for _, t in ipairs(M.tanks) do c = c + fluidIn(t, fluid) end
+  return c
+end
+-- долить из баков в бассейн, чтобы хватило на k партий (бассейн держит 1000 мБ)
+local function topUp(basin, r, k)
+  for _, f in ipairs(r.fluids or {}) do
+    local need = math.min(1000, f.amount * k) - fluidIn(basin, f.fluid)
+    for _, t in ipairs(M.tanks) do
+      if need <= 0 then break end
+      need = need - (call(t, "pushFluid", basin, need, f.fluid) or 0)
+    end
+  end
+end
 
 local function dispatchBasins()
   for _, b in ipairs(M.basin) do
@@ -520,8 +549,16 @@ local function dispatchBasins()
           for _, r in ipairs(runsFor(st)) do cands[#cands + 1] = r end
         end
       end
+      -- воду льём только в опознанный миксер; в неопознанный бассейн - лишь в крайнем случае
+      -- (миксера ещё нет и рецептов смешивания без воды не осталось), иначе вода пропадёт в прессе
+      local knownMix, dryMix = false, false
+      for _, b2 in ipairs(M.basin) do if b2.role == "mix" then knownMix = true end end
+      for _, r in ipairs(runsFor("mix")) do if not r.fluids then dryMix = true end end
       for _, r in ipairs(cands) do
-        local choice, k = pickAlts(r, fluidBatches(b.name, r, share(r, PER_BASIN, #M.basin)))
+       if not (r.fluids and b.role == nil and (knownMix or dryMix)) then
+        local want = share(r, PER_BASIN, #M.basin)
+        if r.fluids and b.role ~= "compact" then topUp(b.name, r, want) end
+        local choice, k = pickAlts(r, fluidBatches(b.name, r, want))
         if choice then
           local total = {}
           for i, g in ipairs(r.ingr) do total[choice[i]] = (total[choice[i]] or 0) + g.n * k end
@@ -531,6 +568,7 @@ local function dispatchBasins()
           progress()
           break
         end
+       end
       end
     end
   end
@@ -670,17 +708,24 @@ local function check()
     if n > 0 and r.station == "compact" then needCompact = true end
   end
   if needMix and needCompact and #M.basin < 2 then lack.mix = true; lack.compact = true end
-  -- рецепты с жидкостью: хоть в одном бассейне (миксер или ещё не опознан) должна быть вода
+  -- жидкости: есть баки - считаем, хватит ли их на весь заказ; нет баков - вода должна идти трубой в бассейн
+  local needF = {}
   for rid, n in pairs(res) do
-    local r = byId[rid]
-    if n > 0 and r.fluids then
-      local ok = false
-      for _, b in ipairs(M.basin) do
-        if b.role ~= "compact" and fluidBatches(b.name, r, 1) >= 1 then ok = true end
-      end
-      if not ok then lack.water = true end
+    for _, f in ipairs(byId[rid].fluids or {}) do needF[f.fluid] = (needF[f.fluid] or 0) + f.amount * n end
+  end
+  local short = {}
+  for fluid, need in pairs(needF) do
+    local inBasins = 0
+    for _, b in ipairs(M.basin) do
+      if b.role ~= "compact" then inBasins = inBasins + fluidIn(b.name, fluid) end
+    end
+    if #M.tanks > 0 then
+      if tankFluid(fluid) + inBasins < need then short[fluid] = need - tankFluid(fluid) - inBasins end
+    elseif inBasins < 250 then
+      lack.water = true
     end
   end
+  if next(short) then S.missing = short; return false end
   if next(lack) then S.noMachine = lack; return false end
   if #cfg.output == 0 or #cfg.stock == 0 or #cfg.waste == 0 then S.noMachine = {storage = true}; return false end
   return true, res
@@ -785,8 +830,8 @@ local function draw(t, dev)
     end
     put(1, y, string.format(" Furnaces %d  Crushers %d  Millstones %d  Washers %d  Basins %d (mix %d/press %d/? %d)",
       #M.furnace, #M.crush, #M.mill, #M.wash, #M.basin, nb.mix, nb.compact, nb.unk), colors.lightGray)
-    put(1, y + 1, string.format(" Lines %d  Deployers %d  Receivers %d  Monitors %d",
-      #M.lines, #M.deployer, #M.buffers, #M.monitors), colors.lightGray)
+    put(1, y + 1, string.format(" Lines %d  Deployers %d  Tanks %d  Receivers %d  Monitors %d",
+      #M.lines, #M.deployer, #M.tanks, #M.buffers, #M.monitors), colors.lightGray)
   end
   local title = " " .. iname(R.target)
 
@@ -911,6 +956,7 @@ local function draw(t, dev)
       add(x.name, depOf[x.name] and ("deployer (" .. short(depOf[x.name]) .. ")") or "deployer (no line)")
     end
     for _, r in ipairs(ROLES) do for _, n in ipairs(cfg[r.key]) do add(n, "storage: " .. r.name) end end
+    for _, n in ipairs(M.tanks) do add(n, "tank: " .. fluidIn(n, "minecraft:water") .. " mB water") end
     for _, n in ipairs(M.buffers) do add(n, "receiver (emptied by the PC)") end
     for _, n in ipairs(M.ignored) do add(n, "not used") end
     for _, n in ipairs(M.monitors) do add(n, "monitor") end
@@ -1073,6 +1119,8 @@ local function drawStatus(t, dev)
     if b.role ~= "mix" then pressN[#pressN + 1] = b.name end
     if b.role ~= "compact" and fluidIn(b.name, "minecraft:water") >= 250 then water = true end
   end
+  local tankW = tankFluid("minecraft:water")
+  if tankW >= 250 then water = true end
   put(1, "Machines:", colors.yellow); y = y + 1
   item(#M.furnace > 0, "Industrial furnace", namesOf(M.furnace),
     #M.furnace == 0 and "modem on any furnace block except the front" or nil)
@@ -1083,7 +1131,10 @@ local function drawStatus(t, dev)
   item(#M.basin >= 2 and #mixN > 0, "Basin with mixer", mixN,
     #M.basin < 2 and "need 2 basins (mixer + press)" or nil)
   item(#M.basin >= 2 and #pressN > 0, "Basin with press", pressN)
-  item(water, "Water in the mixer basin", nil, not water and "pipe from a pump into the mixer basin" or nil)
+  local tankNames = {}
+  for _, t in ipairs(M.tanks) do tankNames[#tankNames + 1] = t .. " " .. fluidIn(t, "minecraft:water") .. "mB" end
+  item(water, "Water (tank or mixer basin)", tankNames,
+    not water and "connect a tank with water, or a pipe into the mixer basin" or nil)
   if #M.lines == 0 then
     item(false, "Assembly line", nil, "modem on the FIRST segment of the belt")
   end

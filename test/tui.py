@@ -9,7 +9,7 @@ ev = '''{ {"dump"},
  {"tap","SELECT","STOCK"}, {"tap","chest_1"}, {"tap","DONE"},
  {"tap","SELECT","ARMOR OUT"}, {"tap","chest_2"}, {"tap","DONE"},
  {"tap","SELECT","BYPRODUCTS"}, {"tap","chest_3"}, {"tap","DONE"},
- {"tap","AUTO","basin_1"}, {"tap","AUTO","basin_0"}, {"tap","MIXER","basin_0"},
+ {"tap","AUTO","basin_1"},
  {"dump"}, {"tap","DETAILS"}, {"dump"}, {"tap","BACK"},
  {"tap","START SYSTEM"}, {"tap","+1"}, {"tap","CHECK","MENU"}, {"dump"}, {"tap","START","MENU"} }'''
 lua, res = run('{qty=2, fresh=true, raw={' + BASE + '}}', limit=60000, events=ev)
