@@ -917,12 +917,112 @@ local function draw(t, dev)
   end
 end
 
+-- монитор слева от компьютера: чек-лист «что подключено, а что нет»
+local STATUS_MON = "left"
+local function drawStatus(t, dev)
+  local w, h = t.getSize()
+  local B = {}
+  BTN[dev] = B
+  t.setBackgroundColor(colors.black); t.clear()
+  local y = 1
+  local function put(x, s, fg, bg)
+    if y > h then return end
+    t.setCursorPos(x, y)
+    if bg then t.setBackgroundColor(bg) end
+    t.setTextColor(fg or colors.white); t.write(s:sub(1, math.max(0, w - x + 1)))
+    t.setBackgroundColor(colors.black)
+  end
+  -- текст с переносом по словам (узкие мониторы)
+  local function para(x, s, fg)
+    local line = ""
+    for word in s:gmatch("%S+") do
+      if #line > 0 and x + #line + 1 + #word - 1 > w then
+        put(x, line, fg); y = y + 1; line = word
+      else
+        line = #line > 0 and (line .. " " .. word) or word
+      end
+    end
+    if #line > 0 then put(x, line, fg); y = y + 1 end
+  end
+  local function tiny(n) return (n:gsub("^%w+:", "")) end
+  t.setCursorPos(1, 1); t.setBackgroundColor(colors.gray); t.write(string.rep(" ", w))
+  put(1, " PODKLYUCHENIE", colors.white, colors.gray)
+  y = 3
+  local allOk = true
+  -- state: true = OK, false = NET, "warn" = zhyoltoe preduprezhdenie
+  local function item(state, label, names, note)
+    if state ~= true and state ~= "warn" then allOk = false end
+    local tag, col = "[ OK ]", colors.lime
+    if state == "warn" then tag, col = "[ !! ]", colors.yellow
+    elseif state ~= true then tag, col = "[NET ]", colors.red end
+    put(1, tag, col)
+    put(8, label, colors.white)
+    y = y + 1
+    if names and #names > 0 then
+      local s = {}
+      for _, n in ipairs(names) do s[#s + 1] = tiny(n) end
+      para(9, table.concat(s, ", "), colors.lightGray)
+    end
+    if note then para(9, note, state == true and colors.lightGray or col) end
+  end
+  local function namesOf(list)
+    local t2 = {}
+    for _, x in ipairs(list) do t2[#t2 + 1] = type(x) == "table" and x.name or x end
+    return t2
+  end
+  local mixN, pressN, water = {}, {}, false
+  for _, b in ipairs(M.basin) do
+    if b.role ~= "compact" then mixN[#mixN + 1] = b.name end
+    if b.role ~= "mix" then pressN[#pressN + 1] = b.name end
+    if b.role ~= "compact" and fluidIn(b.name, "minecraft:water") >= 250 then water = true end
+  end
+  put(1, "Mashiny:", colors.yellow); y = y + 1
+  item(#M.furnace > 0, "Promyshlennaya pech", namesOf(M.furnace),
+    #M.furnace == 0 and "modem na lyuboy blok pechi, krome licevoy" or nil)
+  item(#M.crush > 0, "Drobilnye kolesa", namesOf(M.crush),
+    #M.crush == 0 and "modem vplotnuyu k kontrolleru (mezhdu kolesami)" or nil)
+  item(#M.mill > 0, "Zhernova", namesOf(M.mill))
+  item(#M.wash > 0, "Promyvka (depo)", namesOf(M.wash))
+  item(#M.basin >= 2 and #mixN > 0, "Bassein s mikserom", mixN,
+    #M.basin < 2 and "nuzhno 2 basseyna (mikser + press)" or nil)
+  item(#M.basin >= 2 and #pressN > 0, "Bassein s pressom", pressN)
+  item(water, "Voda v basseyne s mikserom", nil, not water and "truba ot pompy v bassein s mikserom" or nil)
+  item(#M.belt == 1, "Lenta (pervyy segment)", namesOf(M.belt),
+    #M.belt == 0 and "modem na PERVYY segment lenty" or
+    (#M.belt > 1 and "modem kasaetsya " .. #M.belt .. " segmentov - nado tolko pervyy" or nil))
+  item(#M.deployer >= 2, "Razvertyvateli (2)", namesOf(M.deployer),
+    #M.deployer < 2 and ("naydeno " .. #M.deployer .. " iz 2") or nil)
+  item(#M.buffers >= 3 and true or "warn", "Priemniki (" .. #M.buffers .. ")", M.buffers,
+    #M.buffers < 3 and "nuzhny: sunduk pered pechyu, voronka pod drobilkoy, priemnik v konce lenty" or nil)
+  y = y + 1
+  put(1, "Sklady:", colors.yellow); y = y + 1
+  for _, r in ipairs(ROLES) do
+    local present = {}
+    local lost = false
+    for _, n in ipairs(cfg[r.key]) do
+      if peripheral.isPresent(n) then present[#present + 1] = n else lost = true end
+    end
+    item(#present > 0 and not lost, r.name, present,
+      #cfg[r.key] == 0 and "ne vybran (menu > VYBRAT)" or (lost and "sunduk propal iz seti" or nil))
+  end
+  y = y + 1
+  para(1, "PK ne vidit: gorelki (supernagrev), vrashenie, ventilyator s vodoy", colors.gray)
+  if allOk then
+    put(1, " VSE PODKLYUCHENO ", colors.black, colors.lime)
+  else
+    put(1, " CHEGO-TO NE HVATAET ", colors.white, colors.red)
+  end
+  t.setCursorPos(w - 9, h); t.setBackgroundColor(colors.blue); t.setTextColor(colors.white); t.write(" OBNOVIT ")
+  t.setBackgroundColor(colors.black)
+  B[#B + 1] = {x1 = w - 9, x2 = w - 1, y = h, id = "refresh"}
+end
+
 local function redraw()
   for _, m in ipairs(M.monitors) do
     local mon = peripheral.wrap(m)
     if mon then
       mon.setTextScale(0.5)
-      draw(mon, m)
+      if m == STATUS_MON then drawStatus(mon, m) else draw(mon, m) end
     end
   end
   draw(term, "term")

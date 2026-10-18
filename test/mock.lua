@@ -61,6 +61,7 @@ local function mkTerm(w, h)
 end
 term = mkTerm(51, 19)
 local MON = mkTerm(79, 38)
+LEFTMON = mkTerm(LEFT_W or 57, LEFT_H or 38)
 print = function(...) end
 write = function() end
 read = function() return "" end
@@ -125,8 +126,8 @@ end
 peripheral = {
   getNames = function() local o = {} for n in pairs(P) do o[#o + 1] = n end table.sort(o) return o end,
   hasType = function(n, t)
-    if t == "monitor" then return n == "monitor_0" end
-    return P[n] ~= nil and n ~= "monitor_0"
+    if t == "monitor" then return n == "monitor_0" or n == "left" end
+    return P[n] ~= nil and n ~= "monitor_0" and n ~= "left"
   end,
   call = function(n, m, ...)
     local p = P[n]
@@ -134,9 +135,11 @@ peripheral = {
     if m == "size" then return p.size end
     return p[m](...)
   end,
-  wrap = function(n) return MON end,
+  wrap = function(n) if n == "left" then return LEFTMON end return MON end,
+  isPresent = function(n) return P[n] ~= nil end,
 }
 P.monitor_0 = {}
+P.left = {}
 
 ---------------------------------------------------------------- машины
 local function recipesOf(station)
@@ -191,6 +194,7 @@ addPeripheral("arcon:furnace_multiblock_0", newInv(8))
 addPeripheral("create:belt_0", newInv(1, {cap = 1}))
 addPeripheral("create:deployer_0", newInv(1))
 addPeripheral("create:deployer_1", newInv(1))
+if NO_DEPLOYER1 then P["create:deployer_1"] = nil end
 
 local FURN = {busy = 0, r = nil}
 local function tickMachines()
