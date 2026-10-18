@@ -196,17 +196,39 @@ addPeripheral("create:deployer_0", newInv(1))
 addPeripheral("create:deployer_1", newInv(1))
 if NO_DEPLOYER1 then P["create:deployer_1"] = nil end
 
-local FURN = {busy = 0, r = nil}
+-- набор машин: одна линия/печь/дробилка или (MULTI) по две
+CRUSHERS = {{ctrl = "create:crushing_wheel_controller_0", out = "minecraft:hopper_0"}}
+FURNACES = {{name = "arcon:furnace_multiblock_0", out = "minecraft:chest_9", busy = 0}}
+LINES = {{belt = "create:belt_0", d0 = "create:deployer_0", d1 = "create:deployer_1", out = "minecraft:dropper_0"}}
+if MULTI then
+  addPeripheral("create:crushing_wheel_controller_1", newInv(1))
+  addPeripheral("minecraft:hopper_1", newInv(5))
+  addPeripheral("arcon:furnace_multiblock_1", newInv(8))
+  addPeripheral("minecraft:chest_8", newInv(27))
+  addPeripheral("create:belt_1", newInv(1, {cap = 1}))
+  addPeripheral("create:deployer_2", newInv(1))
+  addPeripheral("create:deployer_3", newInv(1))
+  addPeripheral("minecraft:dropper_1", newInv(9))
+  CRUSHERS[2] = {ctrl = "create:crushing_wheel_controller_1", out = "minecraft:hopper_1"}
+  FURNACES[2] = {name = "arcon:furnace_multiblock_1", out = "minecraft:chest_8", busy = 0}
+  LINES[2] = {belt = "create:belt_1", d0 = "create:deployer_2", d1 = "create:deployer_3", out = "minecraft:dropper_1"}
+end
+USED = {}   -- сколько партий сделала каждая машина
+local function markUsed(n) USED[n] = (USED[n] or 0) + 1 end
+
 local function tickMachines()
-  -- дробилка: 1 предмет/сек
-  local c = P["create:crushing_wheel_controller_0"]
-  local s = c.slots[1]
-  if s then
-    for _, r in ipairs(recipesOf("crush")) do
-      if r.ins[1][1] == s.name then
-        s.count = s.count - 1; if s.count == 0 then c.slots[1] = nil end
-        rollOuts(r, function(it, n) putInto(P["minecraft:hopper_0"], it, n) end)
-        break
+  -- дробилки: 1 предмет/сек
+  for _, cr in ipairs(CRUSHERS) do
+    local c = P[cr.ctrl]
+    local s = c.slots[1]
+    if s then
+      for _, r in ipairs(recipesOf("crush")) do
+        if r.ins[1][1] == s.name then
+          s.count = s.count - 1; if s.count == 0 then c.slots[1] = nil end
+          rollOuts(r, function(it, n) putInto(P[cr.out], it, n) end)
+          markUsed(cr.ctrl)
+          break
+        end
       end
     end
   end
@@ -288,12 +310,13 @@ local function tickMachines()
       end
     end
   end
-  -- печь: партия = 5 сек; ингредиент -> отдельный слот
-  local f = P["arcon:furnace_multiblock_0"]
+  -- печи: партия = 5 сек; ингредиент -> отдельный слот
+  for _, FURN in ipairs(FURNACES) do
+  local f = P[FURN.name]
   if FURN.r then
     FURN.busy = FURN.busy - 1
     if FURN.busy <= 0 then
-      rollOuts(FURN.r, function(it, n) putInto(P["minecraft:chest_9"], it, n) end)
+      rollOuts(FURN.r, function(it, n) putInto(P[FURN.out], it, n) end)
       FURN.r = nil
     end
   else
@@ -316,12 +339,15 @@ local function tickMachines()
           if f.slots[i].count == 0 then f.slots[i] = nil end
         end
         FURN.r = r; FURN.busy = 5
+        markUsed(FURN.name)
         break
       end
     end
   end
-  -- лента: предмет проходит развёртыватели, пилу, пресс за 1 сек и падает в дроппер
-  local b = P["create:belt_0"]
+  end
+  -- ленты: предмет проходит развёртыватели, пилу, пресс за 1 сек и падает в дроппер
+  for _, LN in ipairs(LINES) do
+  local b = P[LN.belt]
   local it = b.slots[1]
   if it then
     b.slots[1] = nil
@@ -332,7 +358,8 @@ local function tickMachines()
         if r.transitional == item.name then item.seq = {r = r, step = 1, loop = 1} end
       end
     end
-    local d0, d1 = P["create:deployer_0"], P["create:deployer_1"]
+    markUsed(LN.belt)
+    local d0, d1 = P[LN.d0], P[LN.d1]
     if SWAP_DEPLOYERS then d0, d1 = d1, d0 end
     local stations = {{"deploying", d0}, {"deploying", d1},
                       {"cutting"}, {"pressing"}}
@@ -375,15 +402,16 @@ local function tickMachines()
         end
       end
     end
-    putInto(P["minecraft:dropper_0"], item.name, 1)
+    putInto(P[LN.out], item.name, 1)
     if item.seq then
       -- сохранить прогресс полуфабриката в слоте
-      local d = P["minecraft:dropper_0"]
+      local d = P[LN.out]
       for i = 9, 1, -1 do
         local s = d.slots[i]
         if s and s.name == item.name and not s.seq and s.count == 1 then s.seq = item.seq break end
       end
     end
+  end
   end
 end
 

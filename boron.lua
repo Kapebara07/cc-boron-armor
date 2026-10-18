@@ -16,7 +16,7 @@ local PER_FURNACE = 16    -- партий в печь
 local BASIN_TRIAL = 40    -- сек: если бассейн за это время не тронул ингредиенты — у него другой механизм
 local STALL = 300         -- сек без прогресса -> предупреждение
 
-local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, active = false, target = 1, done = 0}
+local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, lines = {}, active = false, target = 1, done = 0}
 local AUTO_EVERY = 10     -- сек: как часто при работе проверять, хватает ли на следующую броню
 local MAX_BATCH = 4      -- сколько брони планировать за один заход
 local function loadCfg()
@@ -217,10 +217,24 @@ local function discover()
   end
   for _, bs in ipairs(M.basin) do bs.role = cfg.basins[bs.name] end
   table.sort(M.deployer, function(a, c) return a.name < c.name end)
+  table.sort(M.belt, function(a, c) return a.name < c.name end)
+  -- линии: если лента одна и ничего не назначено — все развёртыватели её
+  M.lines = {}
+  local present = {}
+  for _, d in ipairs(M.deployer) do present[d.name] = true end
+  for _, b in ipairs(M.belt) do
+    local deps = {}
+    if cfg.lines[b.name] then
+      for _, d in ipairs(cfg.lines[b.name]) do if present[d] then deps[#deps + 1] = d end end
+    elseif #M.belt == 1 then
+      for _, d in ipairs(M.deployer) do deps[#deps + 1] = d.name end
+    end
+    M.lines[#M.lines + 1] = {belt = b.name, deps = deps, auto = cfg.lines[b.name] == nil}
+  end
 end
 
 local function stationCount(kind)
-  if kind == "line" then return #M.belt end
+  if kind == "line" then return #M.lines end
   if kind == "mix" or kind == "compact" then
     local c = 0
     for _, b in ipairs(M.basin) do if b.role == nil or b.role == kind then c = c + 1 end end
@@ -231,7 +245,7 @@ end
 local STATION_RU = {crush = "crushing wheels", wash = "washing depot", mill = "millstone",
   water = "water in the mixer basin (pipe from a pump)", mix = "basin with mixer",
   compact = "basin with press", furnace = "industrial furnace", line = "assembly belt",
-  deployer = "deployers over the belt (need 2)", belt1 = "modem only on the FIRST belt segment"}
+  deployer = "a line with 2 deployers (menu > assembly lines)"}
 
 ---------------------------------------------------------------- склад
 local idx -- item -> {{inv, slot, count}}
@@ -285,7 +299,7 @@ end
 
 ---------------------------------------------------------------- состояние производства
 local S = {mode = "idle", qty = 1, runs = {}, missing = nil, msg = "", startOut = 0, lastProgress = 0,
-           stall = nil, line = nil, basinJob = {}, washJob = {}, millJob = {}, furnaceJob = {}}
+           stall = nil, line = nil, basinJob = {}, washJob = {}, millJob = {}, lineJob = {}, furnaceJob = {}}
 local function now() return os.epoch("utc") / 1000 end
 
 local function countOutput()
@@ -320,19 +334,29 @@ end
 
 -- забрать результаты из приёмников и машин
 local function drain()
-  local L = S.line
+  local function activeSeq(seq)
+    if #seq.deploy == 0 then return S.seqPress and S.seqPress[seq.id] ~= nil end
+    for _, j in pairs(S.lineJob) do if j.rid == seq.id then return true end end
+    return false
+  end
+  local function credit(name, count)
+    -- готовые изделия сборки засчитываем линиям, которые их собирают
+    for _, j in pairs(S.lineJob) do
+      if count > 0 and name == byId[j.rid].main and j.done < j.k then
+        local c = math.min(count, j.k - j.done); j.done = j.done + c; count = count - c; progress()
+      end
+    end
+    for rid, sp in pairs(S.seqPress or {}) do
+      if count > 0 and name == byId[rid].main then sp.done = sp.done + count; count = 0; progress() end
+    end
+  end
   local function fromBuffer(src)
     for slot, it in pairs(call(src, "list") or {}) do
       local seq = transOf[it.name]
-      if seq and ((L and L.rid == seq.id) or (#seq.deploy == 0 and S.seqPress and S.seqPress[seq.id])) then
-        -- полуфабрикат активной сборки: вернётся на ленту в feedLine
-      else
-        if routeItem(src, slot, it) then
-          if L and it.name == byId[L.rid].main then L.done = L.done + it.count; progress() end
-          for rid, sp in pairs(S.seqPress or {}) do
-            if it.name == byId[rid].main then sp.done = sp.done + it.count; progress() end
-          end
-        end
+      if seq and activeSeq(seq) then
+        -- полуфабрикат активной сборки: вернётся на ленту в dispatchLine
+      elseif routeItem(src, slot, it) then
+        credit(it.name, it.count)
       end
     end
   end
@@ -416,12 +440,17 @@ local function runsFor(station)
 end
 
 ---------------------------------------------------------------- раздача работы
+-- сколько партий дать одной машине: поровну между всеми машинами этого типа
+local function share(r, per, count)
+  return math.min(per, math.max(1, math.ceil(S.runs[r.id] / math.max(1, count))))
+end
+
 local function dispatchSimple(station, machines, per, jobs)
   for _, m in ipairs(machines) do
     if isEmpty(m.name) then
       if jobs then jobs[m.name] = nil end
       for _, r in ipairs(runsFor(station)) do
-        local choice, k = pickAlts(r, math.min(per, S.runs[r.id]))
+        local choice, k = pickAlts(r, share(r, per, #machines))
         if choice then
           local moved = give(choice[1], k * r.ingr[1].n, m.name)
           if moved > 0 then
@@ -443,7 +472,7 @@ local function dispatchFurnace()
     for slot in pairs(l) do if slot <= 8 then busy = true end end
     if not busy then
       for _, r in ipairs(runsFor("furnace")) do
-        local choice, k = pickAlts(r, math.min(PER_FURNACE, S.runs[r.id]))
+        local choice, k = pickAlts(r, share(r, PER_FURNACE, #M.furnace))
         if choice then
           -- каждый ингредиент в свой входной слот, по k штук
           local got = k
@@ -492,7 +521,7 @@ local function dispatchBasins()
         end
       end
       for _, r in ipairs(cands) do
-        local choice, k = pickAlts(r, fluidBatches(b.name, r, math.min(PER_BASIN, S.runs[r.id])))
+        local choice, k = pickAlts(r, fluidBatches(b.name, r, share(r, PER_BASIN, #M.basin)))
         if choice then
           local total = {}
           for i, g in ipairs(r.ingr) do total[choice[i]] = (total[choice[i]] or 0) + g.n * k end
@@ -507,29 +536,36 @@ local function dispatchBasins()
   end
 end
 
--- развёртыватели линии
-local function unloadDeployers()
-  for _, d in ipairs(M.deployer) do
-    for slot, it in pairs(call(d.name, "list") or {}) do routeItem(d.name, slot, it) end
+-- развёртыватели: все (deps == nil) или одной линии
+local function unloadDeployers(deps)
+  if not deps then
+    deps = {}
+    for _, d in ipairs(M.deployer) do deps[#deps + 1] = d.name end
+  end
+  for _, d in ipairs(deps) do
+    for slot, it in pairs(call(d, "list") or {}) do routeItem(d, slot, it) end
   end
 end
 
-local function beltFree()
-  local b = M.belt[1]
-  return b and isEmpty(b.name)
+-- сколько заготовок линия может взять под рецепт с развёртывателями (0 = не может)
+local function lineCap(line, r)
+  local n = #line.deps
+  if n == 0 then return 0 end
+  if n >= #r.deploy then return math.floor(64 / r.loops) end
+  -- один развёртыватель тянет два шага, только если предмет одинаковый
+  if n == 1 and #r.deploy == 2 and r.deploy[1][1] == r.deploy[2][1] then return math.floor(64 / (r.loops * 2)) end
+  return 0
 end
 
-local function feedOne(item)
-  return give(item, 1, M.belt[1].name) == 1
-end
-
-local function feedTransitional()
+-- полуфабрикат из приёмников на ленту этой линии
+local function feedTransitional(line)
+  local job = S.lineJob[line.belt]
   for _, src in ipairs(M.buffers) do
     for slot, it in pairs(call(src, "list") or {}) do
       local seq = transOf[it.name]
       if seq then
-        local active = (S.line and S.line.rid == seq.id) or (S.seqPress and S.seqPress[seq.id])
-        if active and call(src, "pushItems", M.belt[1].name, slot, 1) == 1 then return true end
+        local mine = (#seq.deploy == 0 and S.seqPress and S.seqPress[seq.id]) or (job and job.rid == seq.id)
+        if mine and call(src, "pushItems", line.belt, slot, 1) == 1 then return true end
       end
     end
   end
@@ -537,39 +573,39 @@ local function feedTransitional()
 end
 
 local function dispatchLine()
-  if #M.belt == 0 then return end
+  if #M.lines == 0 then return end
   S.seqPress = S.seqPress or {}
-  -- завершение сборки с развёртывателями
-  local L = S.line
-  if L and L.done >= L.k then unloadDeployers(); S.line = nil; L = nil end
   for rid, sp in pairs(S.seqPress) do if sp.done >= sp.k and sp.fed >= sp.k then S.seqPress[rid] = nil end end
-  -- запуск новой сборки с развёртывателями
-  if not L then
-    for _, r in ipairs(runsFor("line")) do
-      if r.base and #r.deploy > 0 then
-        local cap = math.floor(64 / r.loops)
-        if #M.deployer < #r.deploy then
-          -- один развёртыватель тянет два шага, только если предмет одинаковый
-          if not (#M.deployer == 1 and r.deploy[1][1] == r.deploy[2][1]) then cap = 0
-          else cap = math.floor(64 / (r.loops * 2)) end
-        end
-        local choice, k = pickAlts(r, math.min(cap, S.runs[r.id]))
-        if choice and k > 0 then
-          unloadDeployers()
-          for i = 2, #r.ingr do
-            local d = M.deployer[math.min(i - 1, #M.deployer)]
-            give(choice[i], r.ingr[i].n * k, d.name)
+  -- линии, где сборка готова, освобождаются; свободные берут новую сборку с развёртывателями
+  local able = {}
+  for _, line in ipairs(M.lines) do
+    local job = S.lineJob[line.belt]
+    if job and job.done >= job.k then unloadDeployers(line.deps); S.lineJob[line.belt] = nil end
+  end
+  for _, line in ipairs(M.lines) do
+    if not S.lineJob[line.belt] then
+      for _, r in ipairs(runsFor("line")) do
+        -- один рецепт сборки - только на одной линии: тогда полуфабрикат однозначно возвращается
+        -- на свою ленту, а развёртыватели разных линий не путаются; разные рецепты идут параллельно
+        local busyElsewhere = false
+        for _, j in pairs(S.lineJob) do if j.rid == r.id then busyElsewhere = true end end
+        if r.base and #r.deploy > 0 and lineCap(line, r) > 0 and not busyElsewhere then
+          local choice, k = pickAlts(r, math.min(lineCap(line, r), S.runs[r.id]))
+          if choice and k > 0 then
+            unloadDeployers(line.deps)
+            for i = 2, #r.ingr do
+              give(choice[i], r.ingr[i].n * k, line.deps[math.min(i - 1, #line.deps)])
+            end
+            S.runs[r.id] = S.runs[r.id] - k
+            S.lineJob[line.belt] = {rid = r.id, k = k, fed = 0, done = 0, base = choice[1]}
+            progress()
+            break
           end
-          S.runs[r.id] = S.runs[r.id] - k
-          S.line = {rid = r.id, k = k, fed = 0, done = 0, base = choice[1]}
-          L = S.line
-          progress()
-          break
         end
       end
     end
   end
-  -- сборки только с прессом (броневая плита) — без развёртывателей
+  -- сборки только с прессом (броневая плита) — без развёртывателей, на любой линии
   for _, r in ipairs(runsFor("line")) do
     if r.base and #r.deploy == 0 and not S.seqPress[r.id] then
       local choice, k = pickAlts(r, S.runs[r.id])
@@ -579,25 +615,35 @@ local function dispatchLine()
       end
     end
   end
-  if not beltFree() then return end
-  -- 1) полуфабрикаты обратно на ленту
-  if feedTransitional() then progress(); return end
-  -- 2) заготовки активной сборки (или недоделанные со склада — pickAlts выбрал их как основу)
-  if L and L.fed < L.k and feedOne(L.base) then L.fed = L.fed + 1; progress(); return end
-  for _, sp in pairs(S.seqPress) do
-    if sp.fed < sp.k and feedOne(sp.base) then sp.fed = sp.fed + 1; progress(); return end
-  end
-  -- 3) простое прессование (листы)
-  for _, r in ipairs(runsFor("line")) do
-    if not r.base and have(r.ingr[1].alts[1]) > 0 and feedOne(r.ingr[1].alts[1]) then
-      S.runs[r.id] = S.runs[r.id] - 1; progress(); return
+  -- каждая свободная лента берёт по предмету
+  for _, line in ipairs(M.lines) do
+    if isEmpty(line.belt) then
+      local job = S.lineJob[line.belt]
+      local fed = feedTransitional(line)   -- возврат полуфабриката прогрессом не считаем
+      local new = false
+      if not fed and job and job.fed < job.k and give(job.base, 1, line.belt) == 1 then
+        job.fed = job.fed + 1; fed = true; new = true
+      end
+      if not fed then
+        for _, sp in pairs(S.seqPress) do
+          if sp.fed < sp.k and give(sp.base, 1, line.belt) == 1 then sp.fed = sp.fed + 1; fed = true; new = true; break end
+        end
+      end
+      if not fed then
+        for _, r in ipairs(runsFor("line")) do
+          if not r.base and have(r.ingr[1].alts[1]) > 0 and give(r.ingr[1].alts[1], 1, line.belt) == 1 then
+            S.runs[r.id] = S.runs[r.id] - 1; fed = true; new = true; break
+          end
+        end
+      end
+      if new then progress() end
     end
   end
 end
 
 local function allDone()
   for _, n in pairs(S.runs) do if n > 0 then return false end end
-  if S.line or next(S.seqPress or {}) then return false end
+  if next(S.lineJob) or next(S.seqPress or {}) then return false end
   return countOutput() >= S.startOut + S.qty
 end
 
@@ -616,10 +662,10 @@ local function check()
   for rid, n in pairs(res) do
     local r = byId[rid]
     if n > 0 and r.base and #r.deploy > 0 then
-      local same = #r.deploy == 2 and r.deploy[1][1] == r.deploy[2][1]
-      if #M.deployer == 0 or (#M.deployer < #r.deploy and not same) then lack.deployer = true end
+      local ok = false
+      for _, line in ipairs(M.lines) do if lineCap(line, r) > 0 then ok = true end end
+      if not ok then lack.deployer = true end
     end
-    if n > 0 and r.station == "line" and #M.belt > 1 then lack.belt1 = true end
     if n > 0 and r.station == "mix" then needMix = true end
     if n > 0 and r.station == "compact" then needCompact = true end
   end
@@ -654,7 +700,7 @@ local function start()
 end
 
 local function stop()
-  S.mode = "idle"; S.runs = {}; S.line = nil; S.seqPress = {}
+  S.mode = "idle"; S.runs = {}; S.lineJob = {}; S.seqPress = {}
   unloadDeployers()
 end
 
@@ -739,16 +785,17 @@ local function draw(t, dev)
     end
     put(1, y, string.format(" Furnaces %d  Crushers %d  Millstones %d  Washers %d  Basins %d (mix %d/press %d/? %d)",
       #M.furnace, #M.crush, #M.mill, #M.wash, #M.basin, nb.mix, nb.compact, nb.unk), colors.lightGray)
-    put(1, y + 1, string.format(" Belt %s  Deployers %d  Receivers %d  Monitors %d",
-      #M.belt == 1 and "yes" or (#M.belt == 0 and "NONE" or "TOO MANY(" .. #M.belt .. ")"),
-      #M.deployer, #M.buffers, #M.monitors), colors.lightGray)
+    put(1, y + 1, string.format(" Lines %d  Deployers %d  Receivers %d  Monitors %d",
+      #M.lines, #M.deployer, #M.buffers, #M.monitors), colors.lightGray)
   end
   local title = " " .. iname(R.target)
 
   if UI.screen == "menu" then
     bar(1, title .. " - SETUP", colors.white, colors.gray)
-    put(1, 3, " Storages (press SELECT, several per role allowed):", colors.yellow)
-    local y = 4
+    local gap = h >= 30 and 1 or 0         -- на экране компьютера без пустых строк
+    local y = 2 + gap
+    put(1, y, " Storages (press SELECT, several per role allowed):", colors.yellow)
+    y = y + 1
     for _, r in ipairs(ROLES) do
       put(2, y, string.format("%-16s", r.name), colors.white)
       local names = {}
@@ -758,7 +805,7 @@ local function draw(t, dev)
       btn(w - 9, y, "SELECT", colors.blue, "pick", r.key)
       y = y + 1
     end
-    y = y + 1
+    y = y + gap
     put(1, y, " Basins (what is above them; AUTO = detect itself):", colors.yellow); y = y + 1
     if #M.basin == 0 then put(2, y, "- no basins in the network -", colors.red); y = y + 1 end
     for _, b in ipairs(M.basin) do
@@ -767,7 +814,20 @@ local function draw(t, dev)
       btn(w - 9, y, string.format("%-6s", lbl), b.role and colors.cyan or colors.gray, "basin", b.name)
       y = y + 1
     end
-    y = y + 1
+    y = y + gap
+    put(1, y, " Assembly lines (belt + its 2 deployers):", colors.yellow); y = y + 1
+    if #M.lines == 0 then put(2, y, "- no belt in the network -", colors.red); y = y + 1 end
+    for _, line in ipairs(M.lines) do
+      local names = {}
+      for _, d in ipairs(line.deps) do names[#names + 1] = short(d) end
+      local txt = #names > 0 and table.concat(names, ", ") or "- no deployers -"
+      if line.auto and #names > 0 then txt = txt .. " (auto)" end
+      put(2, y, short(line.belt), colors.white)
+      put(19, y, txt:sub(1, math.max(1, w - 30)), #names >= 2 and colors.lime or colors.red)
+      btn(w - 9, y, "SET", colors.blue, "line", line.belt)
+      y = y + 1
+    end
+    y = y + gap
     put(1, y, " Found in the network:", colors.yellow)
     btn(w - 9, y, "DETAILS", colors.blue, "list")
     machinesLine(y + 1)
@@ -803,6 +863,33 @@ local function draw(t, dev)
     put(x, h, string.format("%d-%d of %d", UI.scroll + 1, math.min(#UI.cand, UI.scroll + rows), #UI.cand), colors.lightGray)
     btn(w - 9, h, "DONE", colors.green, "back")
 
+  elseif UI.screen == "pickdeps" then
+    bar(1, " DEPLOYERS FOR " .. short(UI.belt) .. " (pick the 2 above this belt)", colors.white, colors.gray)
+    put(1, 2, " Tap a row. [x] = on this belt, grey = on another belt (will be moved).", colors.lightGray)
+    local mine = cfg.lines[UI.belt] or {}
+    local rows = h - 4
+    UI.scroll = math.max(0, math.min(UI.scroll, math.max(0, #M.deployer - rows)))
+    for i = 1, rows do
+      local d = M.deployer[i + UI.scroll]
+      if not d then break end
+      local y = 2 + i
+      local on = inList(mine, d.name)
+      local other
+      for belt, list in pairs(cfg.lines) do
+        if belt ~= UI.belt and inList(list, d.name) then other = belt end
+      end
+      local held = next(call(d.name, "list") or {}) and "holds items" or "empty"
+      local info = string.format("%s%-28s %s", on and "[x] " or "[ ] ", short(d.name), held)
+      if other then info = info .. "  (" .. short(other) .. ")" end
+      put(1, y, string.rep(" ", w), colors.white, on and colors.green or colors.black)
+      put(2, y, info, on and colors.black or (other and colors.gray or colors.white), on and colors.green or nil)
+      B[#B + 1] = {x1 = 1, x2 = w, y = y, id = "toggledep", arg = d.name}
+    end
+    if #M.deployer == 0 then put(2, 4, "No deployers in the network. Put a modem on them and right-click it.", colors.red) end
+    local x = btn(1, h, "^", colors.gray, "up")
+    btn(x, h, "v", colors.gray, "down")
+    btn(w - 9, h, "DONE", colors.green, "back")
+
   elseif UI.screen == "list" then
     bar(1, " FOUND IN THE NETWORK", colors.white, colors.gray)
     local rows = {}
@@ -815,8 +902,14 @@ local function draw(t, dev)
     for _, x in ipairs(M.basin) do
       add(x.name, "basin: " .. (x.role == "mix" and "mixer" or (x.role == "compact" and "press" or "auto-detect")))
     end
-    for _, x in ipairs(M.belt) do add(x.name, "belt") end
-    for _, x in ipairs(M.deployer) do add(x.name, "deployer") end
+    local depOf = {}
+    for _, line in ipairs(M.lines) do
+      add(line.belt, "belt (line, " .. #line.deps .. " deployers)")
+      for _, d in ipairs(line.deps) do depOf[d] = line.belt end
+    end
+    for _, x in ipairs(M.deployer) do
+      add(x.name, depOf[x.name] and ("deployer (" .. short(depOf[x.name]) .. ")") or "deployer (no line)")
+    end
     for _, r in ipairs(ROLES) do for _, n in ipairs(cfg[r.key]) do add(n, "storage: " .. r.name) end end
     for _, n in ipairs(M.buffers) do add(n, "receiver (emptied by the PC)") end
     for _, n in ipairs(M.ignored) do add(n, "not used") end
@@ -885,8 +978,12 @@ local function draw(t, dev)
         local r = byId[e[1]]
         if y < h - 3 then put(1, y, string.format("  %-8s x%-3d %s", r.station, e[2], iname(r.main)), colors.white); y = y + 1 end
       end
-      if S.line then
-        put(1, y, string.format(" Belt: %s  %d/%d", iname(byId[S.line.rid].main), S.line.done, S.line.k), colors.cyan); y = y + 1
+      for _, line in ipairs(M.lines) do
+        local j = S.lineJob[line.belt]
+        if j and y < h - 3 then
+          put(1, y, string.format(" %s: %s  %d/%d", short(line.belt), iname(byId[j.rid].main), j.done, j.k), colors.cyan)
+          y = y + 1
+        end
       end
     elseif S.noMachine then
       bar(2, " MISSING MACHINES  (done " .. cfg.done .. " of " .. goal .. ")", colors.white, colors.red)
@@ -987,11 +1084,13 @@ local function drawStatus(t, dev)
     #M.basin < 2 and "need 2 basins (mixer + press)" or nil)
   item(#M.basin >= 2 and #pressN > 0, "Basin with press", pressN)
   item(water, "Water in the mixer basin", nil, not water and "pipe from a pump into the mixer basin" or nil)
-  item(#M.belt == 1, "Belt (first segment)", namesOf(M.belt),
-    #M.belt == 0 and "modem on the FIRST belt segment" or
-    (#M.belt > 1 and "modem touches " .. #M.belt .. " segments - only the first one" or nil))
-  item(#M.deployer >= 2, "Deployers (2)", namesOf(M.deployer),
-    #M.deployer < 2 and ("found " .. #M.deployer .. " of 2") or nil)
+  if #M.lines == 0 then
+    item(false, "Assembly line", nil, "modem on the FIRST segment of the belt")
+  end
+  for _, line in ipairs(M.lines) do
+    item(#line.deps >= 2, "Line " .. tiny(line.belt), line.deps,
+      #line.deps < 2 and ("deployers " .. #line.deps .. " of 2 (menu > lines > SET)") or nil)
+  end
   item(#M.buffers >= 3 and true or "warn", "Receivers (" .. #M.buffers .. ")", M.buffers,
     #M.buffers < 3 and "need: chest in front of furnace, hopper under crusher, receiver at belt end" or nil)
   y = y + 1
@@ -1070,6 +1169,25 @@ local function press(id, arg)
   elseif id == "basin" then
     local cur = cfg.basins[arg]
     cfg.basins[arg] = cur == nil and "mix" or (cur == "mix" and "compact" or nil)
+    saveCfg(); discover()
+  elseif id == "line" then UI.belt = arg; UI.scroll = 0; UI.screen = "pickdeps"
+  elseif id == "toggledep" then
+    -- первая ручная настройка ленты берёт то, что было назначено автоматически
+    if not cfg.lines[UI.belt] then
+      cfg.lines[UI.belt] = {}
+      for _, line in ipairs(M.lines) do
+        if line.belt == UI.belt then for _, d in ipairs(line.deps) do table.insert(cfg.lines[UI.belt], d) end end
+      end
+    end
+    local list = cfg.lines[UI.belt]
+    if inList(list, arg) then
+      for i, n in ipairs(list) do if n == arg then table.remove(list, i) break end end
+    else
+      for _, other in pairs(cfg.lines) do         -- развёртыватель стоит над одной лентой
+        for i, n in ipairs(other) do if n == arg then table.remove(other, i) break end end
+      end
+      list[#list + 1] = arg
+    end
     saveCfg(); discover()
   elseif id == "list" then UI.scroll = 0; UI.screen = "list"
   elseif id == "up" then UI.scroll = math.max(0, UI.scroll - 5)
