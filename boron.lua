@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v15"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v16"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -949,6 +949,7 @@ local function draw(t, dev)
     put(1, y, s, fg, bg)
   end
   local function btn(x, y, label, bg, id, arg)
+    if y < 1 or y > h then return x + #label + 3 end   -- за краем экрана кнопки нет
     put(x, y, " " .. label .. " ", colors.white, bg)
     B[#B + 1] = {x1 = x, x2 = x + #label + 1, y = y, id = id, arg = arg}
     return x + #label + 3
@@ -1021,7 +1022,7 @@ local function draw(t, dev)
     y = y + gap
     put(1, y, " Found in the network:", colors.yellow)
     btn(w - 9, y, "DETAILS", colors.blue, "list")
-    machinesLine(y + 1)
+    if y + 3 < h then machinesLine(y + 1) end   -- на маленьком экране не помещается: есть DETAILS
     if S.msg ~= "" then put(1, h - 1, " " .. S.msg, colors.orange) end
     local x = btn(1, h, "REFRESH", colors.gray, "refresh")
     btn(w - 19, h, "START SYSTEM >", storagesReady() and colors.green or colors.gray, "tostart")
@@ -1240,7 +1241,7 @@ local function draw(t, dev)
     if UI.selScreen ~= UI.screen then UI.sel = 1; UI.selScreen = UI.screen end
     UI.sel = math.max(1, math.min(UI.sel or 1, #B))
     local sb = B[UI.sel]
-    local text = t.getLine(sb.y):sub(sb.x1, sb.x2)
+    local text = (sb.y >= 1 and sb.y <= h) and t.getLine(sb.y):sub(sb.x1, sb.x2) or ""
     t.setCursorPos(sb.x1, sb.y); t.setBackgroundColor(colors.yellow); t.setTextColor(colors.black)
     t.write(text); t.setBackgroundColor(colors.black)
   end
