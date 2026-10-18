@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v14"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v15"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -1235,6 +1235,15 @@ local function draw(t, dev)
     btn(1, h, "STOP", colors.red, "stop")
   end
   put(w - #VERSION, 1, VERSION, colors.lightGray, colors.gray)
+  if dev == "term" and #B > 0 then
+    -- выбор стрелками: подсвечиваем выбранную кнопку жёлтым
+    if UI.selScreen ~= UI.screen then UI.sel = 1; UI.selScreen = UI.screen end
+    UI.sel = math.max(1, math.min(UI.sel or 1, #B))
+    local sb = B[UI.sel]
+    local text = t.getLine(sb.y):sub(sb.x1, sb.x2)
+    t.setCursorPos(sb.x1, sb.y); t.setBackgroundColor(colors.yellow); t.setTextColor(colors.black)
+    t.write(text); t.setBackgroundColor(colors.black)
+  end
   BTN[dev] = B   -- кнопки публикуем после отрисовки целиком
 end
 
@@ -1570,15 +1579,45 @@ local function ui()
   while true do
     local ev = {os.pullEvent()}
     local e = ev[1]
-    if e == "monitor_touch" or e == "mouse_click" or e == "mouse_scroll"
+    if e == "monitor_touch" or e == "mouse_click" or e == "mouse_scroll" or e == "key"
        or e == "peripheral" or e == "peripheral_detach" then
       QUEUE[#QUEUE + 1] = ev
       os.queueEvent("boron_ui")
     end
   end
 end
+-- стрелки двигают выбор по кнопкам экрана компьютера, Enter нажимает
+local function moveSel(dir)
+  local B = BTN.term or {}
+  if #B == 0 then return end
+  local cur = B[UI.sel] or B[1]
+  if dir == "left" then UI.sel = UI.sel > 1 and UI.sel - 1 or #B
+  elseif dir == "right" then UI.sel = UI.sel < #B and UI.sel + 1 or 1
+  else
+    local best, bd
+    for i, b in ipairs(B) do
+      local dy = b.y - cur.y
+      if (dir == "down" and dy > 0) or (dir == "up" and dy < 0) then
+        local d = math.abs(dy) * 1000 + math.abs(b.x1 - cur.x1)
+        if not bd or d < bd then best, bd = i, d end
+      end
+    end
+    if best then UI.sel = best end
+  end
+end
+
 local function handle(ev)
     local e, a, x, y = ev[1], ev[2], ev[3], ev[4]
+    if e == "key" then
+      if a == keys.up then moveSel("up") elseif a == keys.down then moveSel("down")
+      elseif a == keys.left then moveSel("left") elseif a == keys.right or a == keys.tab then moveSel("right")
+      elseif a == keys.enter or a == keys.numPadEnter then
+        local b = (BTN.term or {})[UI.sel or 1]
+        if b then press(b.id, b.arg) end
+      end
+      redraw()
+      return
+    end
     if e == "monitor_touch" or e == "mouse_click" then
       local dev = e == "monitor_touch" and a or "term"
       for _, b in ipairs(BTN[dev] or {}) do

@@ -34,7 +34,7 @@ textutils = {
   unserialize = function(s) local f = load("return " .. s); return f and f() end,
 }
 colors = setmetatable({}, {__index = function(_, k) return k end})
-keys = {s = 31, enter = 28, up = 200, down = 208}
+keys = {s = 31, enter = 28, up = 200, down = 208, left = 203, right = 205, tab = 15, numPadEnter = 156}
 os.epoch = function() return T * 1000 end
 local realDofile = dofile
 dofile = function(p) return realDofile(SRC .. "/" .. p) end
