@@ -538,6 +538,7 @@ for item, n in pairs(SCENARIO.stock or {}) do putInto(P["minecraft:chest_1"], it
 if not SCENARIO.fresh then
   FILES["armor.cfg"] = textutils.serialize({raw = {"minecraft:chest_0"}, stock = {"minecraft:chest_1"},
     output = {"minecraft:chest_2"}, waste = {"minecraft:chest_3"}, basins = {},
+    lines = SCENARIO.lines or {}, lineJobs = SCENARIO.lineJobs or {},
     active = true, target = SCENARIO.qty or 1, done = 0})
 end
 

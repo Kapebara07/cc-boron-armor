@@ -5,7 +5,7 @@ BASE = '''["minecraft:iron_ingot"]=56, ["minecraft:raw_iron"]=10, ["minecraft:ir
  ["arcon:borate_ore"]=32, ["arcon:raw_nickel"]=8, ["arcon:raw_chromium"]=8, ["arcon:raw_manganese"]=8,
  ["minecraft:clay_ball"]=8, ["minecraft:sand"]=8, ["minecraft:obsidian"]=8'''
 # 1) две линии без назначения -> вторая лента без развёртывателей; назначаем через меню
-ev = '''{ {"tap","STOP"}, {"tap","< MENU"}, {"tap","SET","belt_1"}, {"dump"}, {"tap","deployer_2"}, {"tap","deployer_3"}, {"tap","DONE"}, {"tap","SET","belt_0"}, {"tap","deployer_0"}, {"tap","deployer_1"}, {"tap","DONE"}, {"dump"}, {"tap","START SYSTEM"}, {"tap","START","MENU"} }'''
+ev = '''{ {"tap","STOP"}, {"tap","< MENU"}, {"tap","DEP","belt_1"}, {"dump"}, {"tap","deployer_2"}, {"tap","deployer_3"}, {"tap","DONE"}, {"tap","DEP","belt_0"}, {"tap","deployer_0"}, {"tap","deployer_1"}, {"tap","DONE"}, {"dump"}, {"tap","START SYSTEM"}, {"tap","START","MENU"} }'''
 lua, res = run('{qty=2, raw={' + BASE + '}}', limit=60000, events=ev, pre='MULTI = true')
 for i in (1, 2):
     d = lua.eval('DUMPS[%d]' % i)

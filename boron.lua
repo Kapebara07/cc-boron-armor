@@ -2,7 +2,7 @@
 -- CC: Tweaked 1.116, Create 6.0.10, Create: Armored Constructs 1.05.
 -- Механизмы находятся сами по проводной сети; склады один раз назначаются в настройке (клавиша S).
 
-local VERSION = "v10"   -- видна на экранах: так понятно, что обновление встало
+local VERSION = "v11"   -- видна на экранах: так понятно, что обновление встало
 local STATUS_MON = "left"   -- монитор вплотную слева от компьютера: экран «что подключено»
 local DIR = (shell and fs.getDir(shell.getRunningProgram())) or ""
 local R = dofile(fs.combine(DIR, "recipes.lua"))
@@ -18,7 +18,7 @@ local PER_FURNACE = 16    -- партий в печь
 local BASIN_TRIAL = 40    -- сек: если бассейн за это время не тронул ингредиенты — у него другой механизм
 local STALL = 300         -- сек без прогресса -> предупреждение
 
-local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, lines = {}, active = false, target = 1, done = 0}
+local cfg = {raw = {}, stock = {}, output = {}, waste = {}, basins = {}, lines = {}, lineJobs = {}, active = false, target = 1, done = 0}
 local AUTO_EVERY = 10     -- сек: как часто при работе проверять, хватает ли на следующую броню
 local MAX_BATCH = 4      -- сколько брони планировать за один заход
 local function loadCfg()
@@ -264,7 +264,8 @@ local function discover()
     elseif #N.belt == 1 then
       for _, d in ipairs(N.deployer) do deps[#deps + 1] = d.name end
     end
-    N.lines[#N.lines + 1] = {belt = b.name, deps = deps, auto = cfg.lines[b.name] == nil}
+    N.lines[#N.lines + 1] = {belt = b.name, deps = deps, auto = cfg.lines[b.name] == nil,
+      jobs = cfg.lineJobs[b.name]}   -- nil = линия делает все сборки
   end
   -- бассейнов два, про один уже известно - второй, значит, другой
   local unknown, known = {}, {}
@@ -288,10 +289,20 @@ local function stationCount(kind)
   end
   return #M[kind]
 end
+local lackText   -- ниже: текст «чего не хватает» для экрана
 local STATION_RU = {crush = "crushing wheels", wash = "washing depot", mill = "millstone",
   water = "water: a tank with water in the network, or a pipe into the mixer basin", mix = "basin with mixer",
   compact = "basin with press", furnace = "industrial furnace", line = "assembly belt",
   deployer = "a line with 2 deployers (menu > assembly lines)"}
+
+lackText = function(k)
+  if k:sub(1, 5) == "line:" then
+    local r = byId[k:sub(6)]
+    return "no line for " .. (r and iname(r.main) or k) ..
+      ((r and r.base and #r.deploy > 0) and " (needs 2 deployers + JOBS)" or " (menu > lines > JOBS)")
+  end
+  return STATION_RU[k] or k
+end
 
 ---------------------------------------------------------------- склад
 local idx -- item -> {{inv, slot, count}}
@@ -644,8 +655,14 @@ local function fillDeployers()
   end
 end
 
+-- линия делает эту сборку? (в меню JOBS; по умолчанию - все)
+local function lineAllows(line, r)
+  return line.jobs == nil or line.jobs[r.id] == true
+end
+
 -- сколько заготовок линия может взять под рецепт с развёртывателями (0 = не может)
 local function lineCap(line, r)
+  if not lineAllows(line, r) then return 0 end
   local n = #line.deps
   if n == 0 then return 0 end
   if n >= #r.deploy then return math.floor(64 / r.loops) end
@@ -661,7 +678,8 @@ local function feedTransitional(line)
     for slot, it in pairs(call(src, "list") or {}) do
       local seq = transOf[it.name]
       if seq then
-        local mine = (#seq.deploy == 0 and S.seqPress and S.seqPress[seq.id]) or (job and job.rid == seq.id)
+        local mine = (#seq.deploy == 0 and S.seqPress and S.seqPress[seq.id] and lineAllows(line, seq))
+          or (job and job.rid == seq.id)
         if mine and call(src, "pushItems", line.belt, slot, 1) == 1 then return true end
       end
     end
@@ -722,13 +740,16 @@ local function dispatchLine()
         job.fed = job.fed + 1; fed = true; new = true
       end
       if not fed then
-        for _, sp in pairs(S.seqPress) do
-          if sp.fed < sp.k and give(sp.base, 1, line.belt) == 1 then sp.fed = sp.fed + 1; fed = true; new = true; break end
+        for rid, sp in pairs(S.seqPress) do
+          if sp.fed < sp.k and lineAllows(line, byId[rid]) and give(sp.base, 1, line.belt) == 1 then
+            sp.fed = sp.fed + 1; fed = true; new = true; break
+          end
         end
       end
       if not fed then
         for _, r in ipairs(runsFor("line")) do
-          if not r.base and have(r.ingr[1].alts[1]) > 0 and give(r.ingr[1].alts[1], 1, line.belt) == 1 then
+          if not r.base and lineAllows(line, r) and have(r.ingr[1].alts[1]) > 0
+             and give(r.ingr[1].alts[1], 1, line.belt) == 1 then
             S.runs[r.id] = S.runs[r.id] - 1; fed = true; new = true; break
           end
         end
@@ -759,10 +780,14 @@ local function check()
   local needMix, needCompact = false, false
   for rid, n in pairs(res) do
     local r = byId[rid]
-    if n > 0 and r.base and #r.deploy > 0 then
+    if n > 0 and r.station == "line" then
       local ok = false
-      for _, line in ipairs(M.lines) do if lineCap(line, r) > 0 then ok = true end end
-      if not ok then lack.deployer = true end
+      for _, line in ipairs(M.lines) do
+        if r.base and #r.deploy > 0 then
+          if lineCap(line, r) > 0 then ok = true end
+        elseif lineAllows(line, r) then ok = true end
+      end
+      if not ok and #M.lines > 0 then lack["line:" .. rid] = true end
     end
     if n > 0 and r.station == "mix" then needMix = true end
     if n > 0 and r.station == "compact" then needCompact = true end
@@ -832,6 +857,17 @@ local function storagesReady()
 end
 local function roleOf(n)
   for _, r in ipairs(ROLES) do if inList(cfg[r.key], n) then return r end end
+end
+
+-- сборки, которые идут на линиях (листы, плиты, корпус, броня)
+local LINE_RECIPES = {}
+for _, r in ipairs(R.list) do if r.station == "line" then LINE_RECIPES[#LINE_RECIPES + 1] = r end end
+-- нужны ли этой линии развёртыватели (есть ли среди её сборок такие, где они работают)
+local function lineNeedsDeps(line)
+  for _, r in ipairs(LINE_RECIPES) do
+    if lineAllows(line, r) and r.base and #r.deploy > 0 then return true end
+  end
+  return false
 end
 
 -- все хранилища сети, которые можно назначить складом (не машины)
@@ -919,16 +955,19 @@ local function draw(t, dev)
       y = y + 1
     end
     y = y + gap
-    put(1, y, " Assembly lines (belt + its 2 deployers):", colors.yellow); y = y + 1
+    put(1, y, " Assembly lines (DEP = its deployers, JOBS = what it makes):", colors.yellow); y = y + 1
     if #M.lines == 0 then put(2, y, "- no belt in the network -", colors.red); y = y + 1 end
     for _, line in ipairs(M.lines) do
       local names = {}
       for _, d in ipairs(line.deps) do names[#names + 1] = short(d) end
-      local txt = #names > 0 and table.concat(names, ", ") or "- no deployers -"
-      if line.auto and #names > 0 then txt = txt .. " (auto)" end
+      local nj = 0
+      for _ in pairs(line.jobs or {}) do nj = nj + 1 end
+      local jobs = line.jobs and (nj .. " jobs") or "all jobs"
+      local txt = (#names > 0 and (#names .. " deployers") or "no deployers") .. ", " .. jobs
       put(2, y, short(line.belt), colors.white)
-      put(19, y, txt:sub(1, math.max(1, w - 30)), #names >= 2 and colors.lime or colors.red)
-      btn(w - 9, y, "SET", colors.blue, "line", line.belt)
+      put(19, y, txt:sub(1, math.max(1, w - 33)), (#names >= 2 or not lineNeedsDeps(line)) and colors.lime or colors.red)
+      btn(w - 13, y, "DEP", colors.blue, "line", line.belt)
+      btn(w - 7, y, "JOBS", colors.blue, "jobs", line.belt)
       y = y + 1
     end
     y = y + gap
@@ -994,6 +1033,26 @@ local function draw(t, dev)
     btn(x, h, "v", colors.gray, "down")
     btn(w - 9, h, "DONE", colors.green, "back")
 
+  elseif UI.screen == "pickjobs" then
+    bar(1, " JOBS FOR " .. short(UI.belt) .. " (what this line makes)", colors.white, colors.gray)
+    put(1, 2, " Tap a job to switch it. ALL = the line takes any job.", colors.lightGray)
+    local jobs = cfg.lineJobs[UI.belt]
+    local y = 3
+    put(1, y, string.rep(" ", w), colors.white, jobs == nil and colors.green or colors.black)
+    put(2, y, (jobs == nil and "[x] " or "[ ] ") .. "ALL JOBS", jobs == nil and colors.black or colors.white,
+      jobs == nil and colors.green or nil)
+    B[#B + 1] = {x1 = 1, x2 = w, y = y, id = "jobsall"}
+    for _, r in ipairs(LINE_RECIPES) do
+      y = y + 1
+      local on = jobs == nil or jobs[r.id]
+      local what = (r.base and #r.deploy > 0) and "deployers + saw + press" or "press only"
+      put(1, y, string.rep(" ", w), colors.white, on and colors.green or colors.black)
+      put(2, y, string.format("%s%-36s %s", on and "[x] " or "[ ] ", iname(r.main), what),
+        on and colors.black or colors.white, on and colors.green or nil)
+      B[#B + 1] = {x1 = 1, x2 = w, y = y, id = "togglejob", arg = r.id}
+    end
+    btn(w - 9, h, "DONE", colors.green, "back")
+
   elseif UI.screen == "list" then
     bar(1, " FOUND IN THE NETWORK", colors.white, colors.gray)
     local rows = {}
@@ -1008,7 +1067,9 @@ local function draw(t, dev)
     end
     local depOf = {}
     for _, line in ipairs(M.lines) do
-      add(line.belt, "belt (line, " .. #line.deps .. " deployers)")
+      local js = {}
+      for _, r in ipairs(LINE_RECIPES) do if lineAllows(line, r) then js[#js + 1] = iname(r.main) end end
+      add(line.belt, "line, " .. #line.deps .. " deployers: " .. (line.jobs and table.concat(js, ", ") or "all jobs"))
       for _, d in ipairs(line.deps) do depOf[d] = line.belt end
     end
     for _, x in ipairs(M.deployer) do
@@ -1051,7 +1112,7 @@ local function draw(t, dev)
       put(2, y, "Resources are enough for: " .. UI.canMake, UI.canMake > 0 and colors.lime or colors.red)
       y = y + 1
       if S.noMachine then
-        for _, k in ipairs(sortedKeys(S.noMachine)) do put(4, y, "missing: " .. (STATION_RU[k] or k), colors.red); y = y + 1 end
+        for _, k in ipairs(sortedKeys(S.noMachine)) do put(4, y, "missing: " .. lackText(k), colors.red); y = y + 1 end
       end
       if UI.canMake == 0 and S.missing then
         put(2, y, "Missing for 1 armor:", colors.red); y = y + 1
@@ -1095,7 +1156,7 @@ local function draw(t, dev)
     elseif S.noMachine then
       bar(2, " MISSING MACHINES  (done " .. cfg.done .. " of " .. goal .. ")", colors.white, colors.red)
       for _, k in ipairs(sortedKeys(S.noMachine)) do
-        local txt = k == "storage" and "storages not selected (STOP > MENU)" or (STATION_RU[k] or k)
+        local txt = k == "storage" and "storages not selected (STOP > MENU)" or lackText(k)
         put(3, y, txt, colors.red); y = y + 1
       end
     elseif S.missing then
@@ -1204,8 +1265,20 @@ local function drawStatus(t, dev)
     item(false, "Assembly line", nil, "modem on the FIRST segment of the belt")
   end
   for _, line in ipairs(M.lines) do
-    item(#line.deps >= 2, "Line " .. tiny(line.belt), line.deps,
-      #line.deps < 2 and ("deployers " .. #line.deps .. " of 2 (menu > lines > SET)") or nil)
+    local js = {}
+    for _, r in ipairs(LINE_RECIPES) do if lineAllows(line, r) then js[#js + 1] = iname(r.main) end end
+    local okDeps = #line.deps >= 2 or not lineNeedsDeps(line)
+    item(okDeps, "Line " .. tiny(line.belt) .. ": " .. (line.jobs and (#js .. " jobs") or "all jobs"), line.deps,
+      (not okDeps and ("deployers " .. #line.deps .. " of 2 (menu > lines > DEP)") or nil))
+    if line.jobs and #js > 0 then para(9, table.concat(js, ", "), colors.lightGray) end
+  end
+  -- каждой сборке нужна линия
+  for _, r in ipairs(LINE_RECIPES) do
+    local ok = false
+    for _, line in ipairs(M.lines) do
+      if lineAllows(line, r) and (#line.deps >= (r.base and #r.deploy > 0 and 1 or 0)) then ok = true end
+    end
+    if not ok and #M.lines > 0 then item(false, "Line for " .. iname(r.main), nil, "menu > lines > JOBS") end
   end
   if S.noFiller then
     item(false, "Deployer filler", nil, "empty deployers hold the belt: put a few cobblestone (any junk) into BYPRODUCTS")
@@ -1340,6 +1413,17 @@ local function press(id, arg)
       end
       list[#list + 1] = arg
     end
+    saveCfg(); discover()
+  elseif id == "jobs" then UI.belt = arg; UI.screen = "pickjobs"
+  elseif id == "jobsall" then cfg.lineJobs[UI.belt] = nil; saveCfg(); discover()
+  elseif id == "togglejob" then
+    local jobs = cfg.lineJobs[UI.belt]
+    if jobs == nil then      -- из «все» в выбор: снимаем только нажатую
+      jobs = {}
+      for _, r in ipairs(LINE_RECIPES) do jobs[r.id] = true end
+    end
+    if jobs[arg] then jobs[arg] = nil else jobs[arg] = true end
+    cfg.lineJobs[UI.belt] = jobs
     saveCfg(); discover()
   elseif id == "list" then UI.scroll = 0; UI.screen = "list"
   elseif id == "up" then UI.scroll = math.max(0, UI.scroll - 5)
